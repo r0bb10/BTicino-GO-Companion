@@ -15,6 +15,15 @@ func TestFrameBuilders(t *testing.T) {
 	if got := BuildStreamStartAudio(5000); got != "*7*300#127#0#0#1#5000#2*##" {
 		t.Fatalf("unexpected stream audio frame: %s", got)
 	}
+	if got := BuildAVAddStreamVideo("127.0.0.1", 5007, false); got != "*7*300#127#0#0#1#5007#1*##" {
+		t.Fatalf("unexpected low-res av video frame: %s", got)
+	}
+	if got := BuildAVAddStreamVideo("192.168.1.5", 10002, true); got != "*7*300#192#168#1#5#10002#0*##" {
+		t.Fatalf("unexpected high-res av video frame: %s", got)
+	}
+	if got := BuildAVAddStreamAudio("127.0.0.1", 5000); got != "*7*300#127#0#0#1#5000#2*##" {
+		t.Fatalf("unexpected av audio frame: %s", got)
+	}
 }
 
 func TestFramePredicates(t *testing.T) {

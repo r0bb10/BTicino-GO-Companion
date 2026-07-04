@@ -39,7 +39,7 @@ func (c *commandStub) StreamStart(_ context.Context, audioPort, videoPort int) e
 	return c.startErr
 }
 
-func TestCompositeBackendStreamStartUsesSIPWhenAvailable(t *testing.T) {
+func TestCompositeBackendLegacyStreamStartUsesSIPWhenAvailable(t *testing.T) {
 	sip := &sipStub{}
 	cmd := &commandStub{}
 	backend := NewCompositeBackend(sip, cmd, 5000, 5007)
@@ -52,6 +52,104 @@ func TestCompositeBackendStreamStartUsesSIPWhenAvailable(t *testing.T) {
 	}
 	if cmd.startCalls != 0 {
 		t.Fatalf("expected no command stream start when SIP is available, got %d", cmd.startCalls)
+	}
+}
+
+func TestCompositeBackendStreamStartRunsSIPThenAV(t *testing.T) {
+	sip := &sipStub{}
+	av := &commandStub{}
+	backend := NewCompositeBackendWithOptions(CompositeBackendOptions{
+		SIP:       sip,
+		AV:        av,
+		AudioPort: 5000,
+		VideoPort: 5007,
+	})
+
+	if err := backend.StreamStart(context.Background(), "20"); err != nil {
+		t.Fatalf("stream start failed: %v", err)
+	}
+	if sip.startCalls != 1 || sip.devAddr != "20" {
+		t.Fatalf("unexpected sip calls=%d devaddr=%q", sip.startCalls, sip.devAddr)
+	}
+	if av.startCalls != 1 || av.audioPort != 5000 || av.videoPort != 5007 {
+		t.Fatalf("unexpected av calls=%d audio=%d video=%d", av.startCalls, av.audioPort, av.videoPort)
+	}
+}
+
+func TestCompositeBackendStreamStartSkipsSIPWhenCallActive(t *testing.T) {
+	sip := &sipStub{}
+	av := &commandStub{}
+	backend := NewCompositeBackendWithOptions(CompositeBackendOptions{
+		SIP:       sip,
+		AV:        av,
+		CallState: func() string { return "active" },
+		AudioPort: 5000,
+		VideoPort: 5007,
+	})
+
+	if err := backend.StreamStart(context.Background(), "20"); err != nil {
+		t.Fatalf("stream start failed: %v", err)
+	}
+	if sip.startCalls != 0 {
+		t.Fatalf("expected SIP to be skipped for active call, got %d", sip.startCalls)
+	}
+	if av.startCalls != 1 {
+		t.Fatalf("expected AV start, got %d", av.startCalls)
+	}
+}
+
+func TestCompositeBackend486FallsThroughToAV(t *testing.T) {
+	sip := &sipStub{startErr: ErrSIPCallInProgress}
+	av := &commandStub{}
+	backend := NewCompositeBackendWithOptions(CompositeBackendOptions{
+		SIP:       sip,
+		AV:        av,
+		AudioPort: 5000,
+		VideoPort: 5007,
+	})
+
+	if err := backend.StreamStart(context.Background(), "20"); err != nil {
+		t.Fatalf("stream start failed: %v", err)
+	}
+	if sip.startCalls != 1 || av.startCalls != 1 {
+		t.Fatalf("expected SIP then AV, got sip=%d av=%d", sip.startCalls, av.startCalls)
+	}
+}
+
+func TestCompositeBackendAVFailureAfterSIPSuccessCleansUp(t *testing.T) {
+	sip := &sipStub{}
+	av := &commandStub{startErr: errors.New("av failed")}
+	backend := NewCompositeBackendWithOptions(CompositeBackendOptions{
+		SIP:       sip,
+		AV:        av,
+		AudioPort: 5000,
+		VideoPort: 5007,
+		RequireAV: true,
+	})
+
+	if err := backend.StreamStart(context.Background(), "20"); err == nil {
+		t.Fatal("expected stream start error")
+	}
+	if sip.stopCalls != 1 {
+		t.Fatalf("expected SIP cleanup, got %d", sip.stopCalls)
+	}
+}
+
+func TestCompositeBackendOptionalAVFailureAfterSIPSuccessStillStarts(t *testing.T) {
+	sip := &sipStub{}
+	av := &commandStub{startErr: errors.New("av failed")}
+	backend := NewCompositeBackendWithOptions(CompositeBackendOptions{
+		SIP:       sip,
+		AV:        av,
+		AudioPort: 5000,
+		VideoPort: 5007,
+	})
+
+	if err := backend.StreamStart(context.Background(), "20"); err != nil {
+		t.Fatalf("optional AV failure after SIP success must not fail stream start: %v", err)
+	}
+	if sip.stopCalls != 0 {
+		t.Fatalf("did not expect SIP cleanup for optional AV failure, got %d", sip.stopCalls)
 	}
 }
 

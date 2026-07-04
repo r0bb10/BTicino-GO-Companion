@@ -2,15 +2,18 @@ package sipadapter
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"testing"
 	"time"
 
 	"github.com/emiago/sipgo"
+	"github.com/emiago/sipgo/sip"
 
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
+	"bticino-go-companion/internal/services/media"
 )
 
 func TestManagerDisabledLifecycle(t *testing.T) {
@@ -217,5 +220,22 @@ func TestIncomingInviteExpiryCanBeStopped(t *testing.T) {
 	defer m.mu.Unlock()
 	if m.incoming != dlg {
 		t.Fatal("expected incoming dialog to remain after stopped expiry")
+	}
+}
+
+func TestClassifyInviteAnswerErrorMaps486(t *testing.T) {
+	busyPtr := &sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 486}}
+	if err := classifyInviteAnswerError(busyPtr); !errors.Is(err, media.ErrSIPCallInProgress) {
+		t.Fatalf("expected pointer-form 486 to map to ErrSIPCallInProgress, got: %v", err)
+	}
+
+	busyVal := sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 486}}
+	if err := classifyInviteAnswerError(busyVal); !errors.Is(err, media.ErrSIPCallInProgress) {
+		t.Fatalf("expected value-form 486 to map to ErrSIPCallInProgress, got: %v", err)
+	}
+
+	notFound := &sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 404}}
+	if err := classifyInviteAnswerError(notFound); errors.Is(err, media.ErrSIPCallInProgress) {
+		t.Fatalf("404 must not map to ErrSIPCallInProgress: %v", err)
 	}
 }

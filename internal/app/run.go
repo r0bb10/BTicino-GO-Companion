@@ -71,6 +71,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			logger.Printf("device diagnostics bootstrap skipped: %v", err)
 		}
 	}
+	cfg.MediaAVHighResVideo = config.DefaultAVHighResVideo(cfg.DeviceModel)
 
 	authStore, err := auth.NewStore(resolvedConfigPath, cfg.ClaimCode, cfg.DeviceModel, cfg.DeviceMAC)
 	if err != nil {
@@ -219,19 +220,27 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			}()
 		}
 	}
-	mediaBackend := media.NewCompositeBackend(
-		sipManager,
-		commandClient,
-		cfg.MediaRTPAudioPort,
-		cfg.MediaRTPVideoPort,
-	)
+	avBackend := openwebnet.NewAVMediaClient(cfg, logger)
+	logger.Printf("media: AV endpoint backend addr=%s:%d highres=%v", cfg.MediaAVEndpointHost, cfg.MediaAVEndpointPort, cfg.MediaAVHighResVideo)
+	mediaBackend := media.NewCompositeBackendWithOptions(media.CompositeBackendOptions{
+		SIP:       sipManager,
+		Commands:  commandClient,
+		AV:        avBackend,
+		CallState: func() string { return projector.Snapshot().CallState },
+		AudioPort: cfg.MediaRTPAudioPort,
+		VideoPort: cfg.MediaRTPVideoPort,
+		RequireAV: config.RequireAVAddStream(cfg.DeviceModel),
+		Logger:    logger,
+	})
 	mediaService := media.NewService(mediaBackend)
+	mediaService.SetLogger(logger)
 	var rtspServer *rtspadapter.Server
 	var snapshotService *snapshot.Service
 	mediaService.SetTransitionSink(func(tr media.Transition) {
 		if strings.TrimSpace(tr.Kind) == "" {
 			return
 		}
+		logger.Printf("stream transition kind=%s entrypoint=%s devaddr=%s source=%s reason=%s", strings.TrimSpace(tr.Kind), strings.TrimSpace(tr.EntrypointID), strings.TrimSpace(tr.DevAddr), strings.TrimSpace(tr.Source), strings.TrimSpace(tr.Reason))
 		payload := map[string]any{
 			"source": strings.TrimSpace(tr.Source),
 			"reason": strings.TrimSpace(tr.Reason),

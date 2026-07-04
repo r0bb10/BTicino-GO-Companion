@@ -63,6 +63,9 @@ type Config struct {
 	MediaRTSPAddress          string
 	MediaRTPAudioPort         int
 	MediaRTPVideoPort         int
+	MediaAVEndpointHost       string
+	MediaAVEndpointPort       int
+	MediaAVHighResVideo       bool
 	VoicemailMessagesDir      string
 
 	SystemRebootEnabled       bool
@@ -199,6 +202,9 @@ func Default() Config {
 		MediaRTSPAddress:          ":8554",
 		MediaRTPAudioPort:         5000,
 		MediaRTPVideoPort:         5007,
+		MediaAVEndpointHost:       "127.0.0.1",
+		MediaAVEndpointPort:       30007,
+		MediaAVHighResVideo:       true,
 		VoicemailMessagesDir:      "/home/bticino/cfg/extra/47/messages",
 		SystemRebootEnabled:       true,
 		SystemUpdateEnabled:       true,
@@ -499,9 +505,6 @@ func (c *Config) normalize() {
 	if strings.TrimSpace(c.MediaSIPFrom) == "" {
 		c.MediaSIPFrom = "webrtc@127.0.0.1"
 	}
-	if strings.TrimSpace(c.MediaSIPTo) == "" {
-		c.MediaSIPTo = "c300x@127.0.0.1"
-	}
 	if strings.TrimSpace(c.MediaRTSPAddress) == "" {
 		c.MediaRTSPAddress = ":8554"
 	}
@@ -511,6 +514,13 @@ func (c *Config) normalize() {
 	if c.MediaRTPVideoPort <= 0 || c.MediaRTPVideoPort > 65535 {
 		c.MediaRTPVideoPort = 5007
 	}
+	if strings.TrimSpace(c.MediaAVEndpointHost) == "" {
+		c.MediaAVEndpointHost = "127.0.0.1"
+	}
+	if c.MediaAVEndpointPort <= 0 || c.MediaAVEndpointPort > 65535 {
+		c.MediaAVEndpointPort = 30007
+	}
+	c.MediaAVHighResVideo = DefaultAVHighResVideo(c.DeviceModel)
 	if c.VoicemailMessagesDir == "" {
 		c.VoicemailMessagesDir = "/home/bticino/cfg/extra/47/messages"
 	}
@@ -571,6 +581,31 @@ func (c *Config) normalize() {
 	}
 }
 
+// ResolveDefaultStreamDevAddr returns the SIP SDP DEVADDR for stream setup.
+// C100X stores the video-door-entry module id separately from the lock address.
+func ResolveDefaultStreamDevAddr(deviceModel string, fallback string) string {
+	return ResolveDefaultStreamDevAddrWithSource(deviceModel, fallback).DevAddr
+}
+
+type StreamDevAddrResolution struct {
+	DevAddr string
+	Source  string
+	Path    string
+}
+
+func ResolveDefaultStreamDevAddrWithSource(deviceModel string, fallback string) StreamDevAddrResolution {
+	fallback = strings.TrimSpace(fallback)
+	if strings.EqualFold(strings.TrimSpace(deviceModel), "C100X") {
+		if devAddr := detectC100XStreamDevAddr(); devAddr != "" {
+			return StreamDevAddrResolution{DevAddr: devAddr, Source: "bt_eliot", Path: c100xModulesPath}
+		}
+	}
+	if fallback != "" {
+		return StreamDevAddrResolution{DevAddr: fallback, Source: "fallback"}
+	}
+	return StreamDevAddrResolution{DevAddr: "20", Source: "default"}
+}
+
 func configAuthState(cfg Config) AuthState {
 	auth := cfg.Auth
 	auth.ClaimCode = strings.TrimSpace(auth.ClaimCode)
@@ -600,6 +635,64 @@ func normalizeSystemServices(raw map[string]SystemServiceConfig) map[string]Syst
 
 func normalizeName(raw string) string {
 	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+func DefaultAVHighResVideo(deviceModel string) bool {
+	return !strings.EqualFold(strings.TrimSpace(deviceModel), "C100X")
+}
+
+func RequireAVAddStream(deviceModel string) bool {
+	return strings.EqualFold(strings.TrimSpace(deviceModel), "C100X")
+}
+
+var c100xModulesPath = "/home/bticino/cfg/extra/.bt_eliot/mymodules"
+
+type c100xModule struct {
+	ID             string `json:"id"`
+	System         string `json:"system"`
+	DeviceType     string `json:"deviceType"`
+	PrivateAddress struct {
+		AddressValues []struct {
+			Value string `json:"value"`
+		} `json:"addressValues"`
+	} `json:"privateAddress"`
+}
+
+type c100xModulesFile struct {
+	Modules []c100xModule `json:"modules"`
+}
+
+func detectC100XStreamDevAddr() string {
+	b, err := os.ReadFile(c100xModulesPath)
+	if err != nil {
+		return ""
+	}
+	var file c100xModulesFile
+	if err := json.Unmarshal(b, &file); err != nil {
+		return ""
+	}
+	var matches []string
+	for _, m := range file.Modules {
+		if !strings.EqualFold(m.System, "videodoorentry") || !strings.EqualFold(m.DeviceType, "EU") {
+			continue
+		}
+		has20 := false
+		for _, av := range m.PrivateAddress.AddressValues {
+			if strings.TrimSpace(av.Value) == "20" {
+				has20 = true
+				break
+			}
+		}
+		if has20 {
+			if id := strings.TrimSpace(m.ID); id != "" {
+				matches = append(matches, id)
+			}
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0]
+	}
+	return ""
 }
 
 func boolPtr(v bool) *bool {

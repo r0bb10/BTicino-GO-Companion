@@ -24,6 +24,9 @@ func TestDefaultConfigHasEntrypoint(t *testing.T) {
 	if cfg.MediaRTPAudioPort != 5000 || cfg.MediaRTPVideoPort != 5007 {
 		t.Fatalf("unexpected rtp defaults: audio=%d video=%d", cfg.MediaRTPAudioPort, cfg.MediaRTPVideoPort)
 	}
+	if cfg.MediaAVEndpointHost != "127.0.0.1" || cfg.MediaAVEndpointPort != 30007 || !cfg.MediaAVHighResVideo {
+		t.Fatalf("unexpected av endpoint defaults: host=%s port=%d highres=%v", cfg.MediaAVEndpointHost, cfg.MediaAVEndpointPort, cfg.MediaAVHighResVideo)
+	}
 	if len(cfg.Entrypoints) != 1 {
 		t.Fatalf("expected 1 default entrypoint, got %d", len(cfg.Entrypoints))
 	}
@@ -68,6 +71,74 @@ func TestSaveLoadPersistsDeviceModel(t *testing.T) {
 	}
 	if loaded.DeviceModel != "C100X" {
 		t.Fatalf("expected persisted model C100X, got %q", loaded.DeviceModel)
+	}
+}
+
+func TestC100XUsesLowResAVDefault(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "config.json")
+
+	cfg := Default()
+	cfg.DeviceModel = "C100X"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if loaded.MediaAVHighResVideo {
+		t.Fatal("expected C100X to default to low-res AV video")
+	}
+	if loaded.MediaAVEndpointHost != "127.0.0.1" || loaded.MediaAVEndpointPort != 30007 {
+		t.Fatalf("unexpected C100X av endpoint: %s:%d", loaded.MediaAVEndpointHost, loaded.MediaAVEndpointPort)
+	}
+}
+
+func TestAVAddStreamRequirementByModel(t *testing.T) {
+	if RequireAVAddStream("C300X") {
+		t.Fatal("expected C300X AV add-stream to be optional after SIP success")
+	}
+	if !RequireAVAddStream("C100X") {
+		t.Fatal("expected C100X AV add-stream to be required")
+	}
+}
+
+func TestResolveDefaultStreamDevAddr(t *testing.T) {
+	if got := ResolveDefaultStreamDevAddr("C300X", "20"); got != "20" {
+		t.Fatalf("expected C300X stream devaddr fallback 20, got %q", got)
+	}
+	if got := ResolveDefaultStreamDevAddr("C100X", "20"); got != "20" {
+		t.Fatalf("expected C100X stream devaddr fallback 20 when modules file is absent, got %q", got)
+	}
+	if got := ResolveDefaultStreamDevAddr("", ""); got != "20" {
+		t.Fatalf("expected empty stream devaddr fallback 20, got %q", got)
+	}
+}
+
+func TestDetectC100XStreamDevAddr(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "mymodules")
+	originalPath := c100xModulesPath
+	c100xModulesPath = path
+	t.Cleanup(func() { c100xModulesPath = originalPath })
+
+	body := `{
+  "modules": [
+    {"id": "12", "system": "videodoorentry", "deviceType": "EU", "privateAddress": {"addressValues": [{"value": "20"}] }},
+    {"id": "34", "system": "lighting", "deviceType": "EU", "privateAddress": {"addressValues": [{"value": "20"}] }}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write modules file: %v", err)
+	}
+
+	if got := detectC100XStreamDevAddr(); got != "12" {
+		t.Fatalf("expected detected C100X stream devaddr 12, got %q", got)
+	}
+	if got := ResolveDefaultStreamDevAddr("C100X", "20"); got != "12" {
+		t.Fatalf("expected C100X stream devaddr 12, got %q", got)
 	}
 }
 
