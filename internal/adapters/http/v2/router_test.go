@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -146,6 +147,41 @@ func TestRouterRejectsUnauthorizedProtectedEndpoint(t *testing.T) {
 	r.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestLogsEndpointRequiresBearerAndReturnsTail(t *testing.T) {
+	r, token := newAuthedRouter(t)
+	logPath := filepath.Join(t.TempDir(), "companion.log")
+	if err := os.WriteFile(logPath, []byte("first\nsecond\n"), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	originalPath := companionLogPath
+	companionLogPath = logPath
+	t.Cleanup(func() { companionLogPath = originalPath })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/logs", nil)
+	rr := httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated logs 401, got %d", rr.Code)
+	}
+
+	req = authReq(http.MethodGet, "/api/v2/logs", token)
+	rr = httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected logs 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Log  string `json:"log"`
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode logs response: %v", err)
+	}
+	if !strings.Contains(body.Log, "second") || body.Path != logPath {
+		t.Fatalf("unexpected logs response: %+v", body)
 	}
 }
 

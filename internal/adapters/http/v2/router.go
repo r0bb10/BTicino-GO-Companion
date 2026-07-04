@@ -83,6 +83,7 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v2/entrypoints/{id}/snapshot/latest.jpg", r.withBearer(r.handleEntrypointSnapshotLatest))
 	mux.HandleFunc("GET /api/v2/state", r.withBearer(r.handleState))
 	mux.HandleFunc("GET /api/v2/events", r.withBearer(r.handleEventsSSE))
+	mux.HandleFunc("GET /api/v2/logs", r.withBearer(r.handleLogs))
 	mux.HandleFunc("GET /api/v2/trace/openwebnet", r.withBearer(r.handleOpenWebNetTrace))
 	mux.HandleFunc("GET /api/v2/trace/openwebnet/stream", r.withBearer(r.handleOpenWebNetTraceStream))
 	mux.HandleFunc("GET /api/v2/voicemail/messages", r.withBearer(r.handleVoicemailMessages))

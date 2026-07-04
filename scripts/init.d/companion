@@ -107,7 +107,7 @@ do_start() {
 	cleanup_stale_pidfile
 	ensure_firewall
 	start-stop-daemon --start --quiet --oknodo --background --make-pidfile \
-		--pidfile "${PIDFILE}" --exec "${BIN_PATH}" -- >>"${LOGFILE}" 2>&1
+		--pidfile "${PIDFILE}" --startas /bin/sh -- -c "exec '${BIN_PATH}' >>'${LOGFILE}' 2>&1"
 }
 
 do_stop() {
