@@ -83,9 +83,30 @@ type Config struct {
 	ExposeMuteControl         bool
 	VoicemailEnabled          bool
 	ExposeVoicemailToggle     bool
+	WebAuth                   WebAuthConfig
+	WebUI                     WebUIConfig
+	IceServers                []string
 
 	Auth        AuthState
 	Entrypoints []entrypoint.Model
+}
+
+type WebAuthConfig struct {
+	Enabled       bool
+	Username      string
+	PasswordHash  string
+	SessionSecret string
+}
+
+type WebUIConfig struct {
+	ListenAddr string
+	TLS        WebUITLSConfig
+}
+
+type WebUITLSConfig struct {
+	Enabled  bool
+	CertFile string
+	KeyFile  string
 }
 
 type AuthState struct {
@@ -149,6 +170,31 @@ type PersistedCompanionConfig struct {
 	Entrypoints []entrypoint.Model        `json:"entrypoints"`
 	Audio       PersistedCompanionAudio   `json:"audio"`
 	Voicemail   PersistedCompanionMailbox `json:"voicemail"`
+	WebAuth     *PersistedWebAuth         `json:"web_auth,omitempty"`
+	WebUI       PersistedWebUI            `json:"web_ui,omitempty"`
+	WebRTC      PersistedWebRTC           `json:"webrtc,omitempty"`
+}
+
+type PersistedWebAuth struct {
+	Enabled       *bool  `json:"enabled,omitempty"`
+	Username      string `json:"username,omitempty"`
+	PasswordHash  string `json:"password_hash,omitempty"`
+	SessionSecret string `json:"session_secret,omitempty"`
+}
+
+type PersistedWebUI struct {
+	ListenAddr string            `json:"listen_addr,omitempty"`
+	TLS        PersistedWebUITLS `json:"tls,omitempty"`
+}
+
+type PersistedWebUITLS struct {
+	Enabled  *bool  `json:"enabled,omitempty"`
+	CertFile string `json:"cert_file,omitempty"`
+	KeyFile  string `json:"key_file,omitempty"`
+}
+
+type PersistedWebRTC struct {
+	IceServers []string `json:"ice_servers"`
 }
 
 type PersistedCompanionAudio struct {
@@ -226,6 +272,12 @@ func Default() Config {
 		ExposeMuteControl:      true,
 		VoicemailEnabled:       true,
 		ExposeVoicemailToggle:  true,
+		WebUI: WebUIConfig{
+			ListenAddr: ":80",
+			TLS: WebUITLSConfig{
+				Enabled: false,
+			},
+		},
 		Entrypoints: []entrypoint.Model{
 			{
 				ID:        "main",
@@ -316,6 +368,25 @@ func Load(path string) (Config, error) {
 	}
 	cfg.VoicemailEnabled = boolFromPtr(persisted.Companion.Config.Voicemail.Enabled, cfg.VoicemailEnabled)
 	cfg.ExposeVoicemailToggle = boolFromPtr(persisted.Companion.Config.Voicemail.Exposed, cfg.ExposeVoicemailToggle)
+	if persisted.Companion.Config.WebAuth != nil {
+		cfg.WebAuth = WebAuthConfig{
+			Enabled:       boolFromPtr(persisted.Companion.Config.WebAuth.Enabled, true),
+			Username:      strings.TrimSpace(persisted.Companion.Config.WebAuth.Username),
+			PasswordHash:  strings.TrimSpace(persisted.Companion.Config.WebAuth.PasswordHash),
+			SessionSecret: strings.TrimSpace(persisted.Companion.Config.WebAuth.SessionSecret),
+		}
+	}
+	if strings.TrimSpace(persisted.Companion.Config.WebUI.ListenAddr) != "" {
+		cfg.WebUI.ListenAddr = strings.TrimSpace(persisted.Companion.Config.WebUI.ListenAddr)
+	}
+	cfg.WebUI.TLS = WebUITLSConfig{
+		Enabled:  boolFromPtr(persisted.Companion.Config.WebUI.TLS.Enabled, cfg.WebUI.TLS.Enabled),
+		CertFile: strings.TrimSpace(persisted.Companion.Config.WebUI.TLS.CertFile),
+		KeyFile:  strings.TrimSpace(persisted.Companion.Config.WebUI.TLS.KeyFile),
+	}
+	if len(persisted.Companion.Config.WebRTC.IceServers) > 0 {
+		cfg.IceServers = persisted.Companion.Config.WebRTC.IceServers
+	}
 
 	cfg.normalize()
 	return cfg, nil
@@ -332,6 +403,16 @@ func Save(path string, cfg Config) error {
 		persistedServices[name] = PersistedSystemService{
 			Enabled: boolPtr(sc.Enabled),
 			Exposed: boolPtr(sc.Exposed),
+		}
+	}
+
+	var persistedWebAuth *PersistedWebAuth
+	if strings.TrimSpace(cfg.WebAuth.Username) != "" || strings.TrimSpace(cfg.WebAuth.PasswordHash) != "" || strings.TrimSpace(cfg.WebAuth.SessionSecret) != "" {
+		persistedWebAuth = &PersistedWebAuth{
+			Enabled:       boolPtr(cfg.WebAuth.Enabled),
+			Username:      strings.TrimSpace(cfg.WebAuth.Username),
+			PasswordHash:  strings.TrimSpace(cfg.WebAuth.PasswordHash),
+			SessionSecret: strings.TrimSpace(cfg.WebAuth.SessionSecret),
 		}
 	}
 
@@ -371,6 +452,23 @@ func Save(path string, cfg Config) error {
 					MessagesDir: strings.TrimSpace(cfg.VoicemailMessagesDir),
 					Enabled:     boolPtr(cfg.VoicemailEnabled),
 					Exposed:     boolPtr(cfg.ExposeVoicemailToggle),
+				},
+				WebAuth: persistedWebAuth,
+			WebRTC: PersistedWebRTC{
+				IceServers: func() []string {
+					if cfg.IceServers == nil {
+						return []string{}
+					}
+					return cfg.IceServers
+				}(),
+			},
+				WebUI: PersistedWebUI{
+					ListenAddr: strings.TrimSpace(cfg.WebUI.ListenAddr),
+					TLS: PersistedWebUITLS{
+						Enabled:  boolPtr(cfg.WebUI.TLS.Enabled),
+						CertFile: strings.TrimSpace(cfg.WebUI.TLS.CertFile),
+						KeyFile:  strings.TrimSpace(cfg.WebUI.TLS.KeyFile),
+					},
 				},
 			},
 		},
@@ -579,6 +677,18 @@ func (c *Config) normalize() {
 		c.VoicemailEnabled = false
 		c.ExposeVoicemailToggle = false
 	}
+	c.WebAuth.Username = strings.TrimSpace(c.WebAuth.Username)
+	c.WebAuth.PasswordHash = strings.TrimSpace(c.WebAuth.PasswordHash)
+	c.WebAuth.SessionSecret = strings.TrimSpace(c.WebAuth.SessionSecret)
+	if c.WebAuth.PasswordHash != "" {
+		c.WebAuth.Enabled = true
+	}
+	c.WebUI.ListenAddr = strings.TrimSpace(c.WebUI.ListenAddr)
+	if c.WebUI.ListenAddr == "" {
+		c.WebUI.ListenAddr = ":80"
+	}
+	c.WebUI.TLS.CertFile = strings.TrimSpace(c.WebUI.TLS.CertFile)
+	c.WebUI.TLS.KeyFile = strings.TrimSpace(c.WebUI.TLS.KeyFile)
 }
 
 // ResolveDefaultStreamDevAddr returns the SIP SDP DEVADDR for stream setup.

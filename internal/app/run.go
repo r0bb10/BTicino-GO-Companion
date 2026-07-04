@@ -18,6 +18,7 @@ import (
 	"bticino-go-companion/internal/adapters/openwebnet"
 	"bticino-go-companion/internal/adapters/rtsp"
 	"bticino-go-companion/internal/adapters/sip"
+	"bticino-go-companion/internal/adapters/webui"
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
@@ -137,6 +138,13 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		Handler:      nil,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 0,
+		IdleTimeout:  30 * time.Second,
+	}
+	webUIServer := &http.Server{
+		Addr:         cfg.WebUI.ListenAddr,
+		Handler:      webui.New(webui.Options{ConfigPath: resolvedConfigPath, Logger: logger, AuthStore: authStore, Runtime: webui.RuntimeDeviceInfo{Model: cfg.DeviceModel, Firmware: cfg.DeviceFirmware, Hardware: cfg.DeviceHardware}, Status: runtimeStatus}).Handler(),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  30 * time.Second,
 	}
 
@@ -262,7 +270,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	if cfg.MediaRTSPEnabled {
 		rtspServer = rtspadapter.NewServer(cfg, logger, mediaService)
 		snapshotService = snapshot.New(cfg, mediaService, rtspServer, logger)
-		webrtcSvc, err = webrtc.New(logger, mediaService, rtspServer, cfg.Entrypoints)
+		webrtcSvc, err = webrtc.New(logger, mediaService, rtspServer, cfg.Entrypoints, cfg.IceServers)
 		if err != nil {
 			return fmt.Errorf("init webrtc service: %w", err)
 		}
@@ -349,6 +357,20 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
+		_ = webUIServer.Shutdown(shutdownCtx)
+	}()
+
+	go func() {
+		logger.Printf("companion web ui listening on %s tls=%v", webUIServer.Addr, cfg.WebUI.TLS.Enabled)
+		var err error
+		if cfg.WebUI.TLS.Enabled {
+			err = webUIServer.ListenAndServeTLS(cfg.WebUI.TLS.CertFile, cfg.WebUI.TLS.KeyFile)
+		} else {
+			err = webUIServer.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
+			logger.Printf("web ui server stopped: %v", err)
+		}
 	}()
 
 	logger.Printf("companion v2 api listening on %s", cfg.ListenAddr)

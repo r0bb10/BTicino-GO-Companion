@@ -84,6 +84,7 @@ type Service struct {
 	audioPacketCount  int
 	lastVideoCountLog time.Time
 	lastAudioCountLog time.Time
+	iceServers        []string
 }
 
 type session struct {
@@ -102,7 +103,7 @@ type session struct {
 	closeOnce            sync.Once
 }
 
-func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWriter, entrypoints []entrypoint.Model) (*Service, error) {
+func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWriter, entrypoints []entrypoint.Model, iceServers []string) (*Service, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
@@ -173,6 +174,7 @@ func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWrit
 		pendingCandidates: map[string]pendingCandidateBatch{},
 		devAddrMap:        devAddrMap,
 		api:               api,
+		iceServers:        iceServers,
 	}, nil
 }
 
@@ -244,7 +246,15 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	}
 	audioDirection := answerDirectionFromOfferAudio(offerSDP)
 
-	pc, err := s.api.NewPeerConnection(webrtc.Configuration{})
+	cfg := webrtc.Configuration{}
+	if len(s.iceServers) > 0 {
+		ices := make([]webrtc.ICEServer, len(s.iceServers))
+		for i, url := range s.iceServers {
+			ices[i] = webrtc.ICEServer{URLs: []string{url}}
+		}
+		cfg.ICEServers = ices
+	}
+	pc, err := s.api.NewPeerConnection(cfg)
 	if err != nil {
 		return OfferResult{}, fmt.Errorf("create peer connection: %w", err)
 	}
