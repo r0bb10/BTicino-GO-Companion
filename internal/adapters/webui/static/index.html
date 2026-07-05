@@ -150,11 +150,11 @@
       <div class="card">
         <div class="card-header">Log Viewer</div>
         <div class="toolbar-row">
-          <select class="form-input filter-select" id="logLevelFilter">
-            <option value="I" selected>INFO</option>
-            <option value="D">DEBUG</option>
-            <option value="W">WARN</option>
-            <option value="E">ERROR</option>
+          <select class="form-input filter-select" id="logRuntimeLevel" title="Log level">
+            <option value="debug">Log Level: DEBUG</option>
+            <option value="info">Log Level: INFO</option>
+            <option value="warn">Log Level: WARN</option>
+            <option value="error">Log Level: ERROR</option>
           </select>
           <input class="form-input log-search" id="logSearch" type="text" placeholder="Search…">
           <button class="btn btn-primary btn-sm" id="logPauseBtn" onclick="toggleLogPause()">Pause</button>

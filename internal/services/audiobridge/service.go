@@ -2,6 +2,7 @@ package audiobridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"bticino-go-companion/internal/logger"
@@ -29,6 +31,7 @@ const (
 
 	pipelineRestartDelay       = time.Second
 	pipelineMaxRestartAttempts = 6
+	speexWarmupWindow          = 3 * time.Second
 )
 
 type pipelineSpec struct {
@@ -104,6 +107,10 @@ type Service struct {
 
 	speexInConn *net.UDPConn
 	opusInConn  *net.UDPConn
+
+	startedAt           time.Time
+	speexReady          bool
+	lastSpeexRefusedLog time.Time
 }
 
 func New(cfg Config) *Service {
@@ -179,6 +186,9 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 	s.procs = procs
 	s.running = true
+	s.startedAt = time.Now()
+	s.speexReady = false
+	s.lastSpeexRefusedLog = time.Time{}
 	s.mu.Unlock()
 
 	go func() {
@@ -215,6 +225,9 @@ func (s *Service) Stop(_ context.Context) error {
 	s.cancel = nil
 	s.procs = nil
 	s.running = false
+	s.startedAt = time.Time{}
+	s.speexReady = false
+	s.lastSpeexRefusedLog = time.Time{}
 	s.closeInputsLocked()
 	s.mu.Unlock()
 
@@ -237,6 +250,9 @@ func (s *Service) WriteIntercomSpeex(pkt *rtp.Packet) error {
 	if s == nil || pkt == nil || !s.cfg.Enabled {
 		return nil
 	}
+	if !s.IsRunning() {
+		return nil
+	}
 	raw, err := pkt.Marshal()
 	if err != nil {
 		logger.Warnf(tag, "write intercom speex marshal failed err=%v", err)
@@ -248,10 +264,24 @@ func (s *Service) WriteIntercomSpeex(pkt *rtp.Packet) error {
 		return err
 	}
 	if _, err := conn.Write(raw); err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			s.handleSpeexConnRefused(len(raw))
+			return nil
+		}
 		logger.Warnf(tag, "write intercom speex failed bytes=%d err=%v", len(raw), err)
 		return err
 	}
+	s.markSpeexReady()
 	return nil
+}
+
+func (s *Service) IsRunning() bool {
+	if s == nil || !s.cfg.Enabled {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
 }
 
 func (s *Service) WriteBackchannelOpus(pkt *rtp.Packet) error {
@@ -289,6 +319,31 @@ func (s *Service) speexInputConnection() (*net.UDPConn, error) {
 	s.speexInConn = conn
 	logger.Debugf(tag, "speex input connected addr=%s", addr.String())
 	return conn, nil
+}
+
+func (s *Service) handleSpeexConnRefused(payloadBytes int) {
+	s.mu.Lock()
+	s.closeSpeexInputLocked()
+	withinWarmup := !s.startedAt.IsZero() && time.Since(s.startedAt) <= speexWarmupWindow
+	shouldLog := !withinWarmup || s.lastSpeexRefusedLog.IsZero() || time.Since(s.lastSpeexRefusedLog) >= time.Second
+	if shouldLog {
+		s.lastSpeexRefusedLog = time.Now()
+	}
+	s.mu.Unlock()
+
+	if shouldLog {
+		if withinWarmup {
+			logger.Debugf(tag, "write intercom speex dropped during warmup bytes=%d reason=connection_refused", payloadBytes)
+		} else {
+			logger.Warnf(tag, "write intercom speex dropped bytes=%d reason=connection_refused", payloadBytes)
+		}
+	}
+}
+
+func (s *Service) markSpeexReady() {
+	s.mu.Lock()
+	s.speexReady = true
+	s.mu.Unlock()
 }
 
 func (s *Service) opusInputConnection() (*net.UDPConn, error) {
@@ -494,12 +549,20 @@ func bundledGSTEnv(bundleRoot string) []string {
 }
 
 func (s *Service) closeInputsLocked() {
+	s.closeSpeexInputLocked()
+	s.closeOpusInputLocked()
+}
+
+func (s *Service) closeSpeexInputLocked() {
 	if s.speexInConn != nil {
 		if err := s.speexInConn.Close(); err != nil {
 			logger.Warnf(tag, "close speex input failed err=%v", err)
 		}
 		s.speexInConn = nil
 	}
+}
+
+func (s *Service) closeOpusInputLocked() {
 	if s.opusInConn != nil {
 		if err := s.opusInConn.Close(); err != nil {
 			logger.Warnf(tag, "close opus input failed err=%v", err)

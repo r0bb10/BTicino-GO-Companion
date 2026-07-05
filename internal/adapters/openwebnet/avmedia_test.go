@@ -145,6 +145,25 @@ func TestAVMediaClientFailsAfterPersistentVideoNAK(t *testing.T) {
 	}
 }
 
+func TestAVMediaClientVideoNAKContinuesWhenVideoFlowing(t *testing.T) {
+	srv := newFakeAVServer(t, "*#*0##", "*#*0##", "*#*0##", "*#*1##")
+	c := newTestAVClient(t, srv, false)
+	c.videoConfirmTimeout = 200 * time.Millisecond
+	c.videoConfirmPoll = 10 * time.Millisecond
+	c.videoConfirmMinDelta = 1
+	var count uint64
+	c.SetVideoCounter(func() uint64 { return count })
+	time.AfterFunc(20*time.Millisecond, func() { count = 2 })
+
+	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
+		t.Fatalf("video NAK with progressing RTP must not fail stream start: %v", err)
+	}
+	frames := srv.receivedFrames()
+	if len(frames) != 4 {
+		t.Fatalf("expected 3 video retries + 1 audio write, got %d", len(frames))
+	}
+}
+
 func TestAVMediaClientAudioFailureIsBestEffort(t *testing.T) {
 	srv := newFakeAVServer(t, "*#*1##", "*#*0##", "*#*0##", "*#*0##")
 	c := newTestAVClient(t, srv, false)

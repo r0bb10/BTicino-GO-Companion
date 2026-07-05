@@ -29,6 +29,11 @@ type AVMediaClient struct {
 	maxAttempts  int
 	audioDelay   time.Duration
 
+	videoCounter         func() uint64
+	videoConfirmTimeout  time.Duration
+	videoConfirmPoll     time.Duration
+	videoConfirmMinDelta uint64
+
 	mu   sync.Mutex
 	conn net.Conn
 }
@@ -43,7 +48,17 @@ func NewAVMediaClient(cfg config.Config) *AVMediaClient {
 		retryDelay:   time.Second,
 		maxAttempts:  3,
 		audioDelay:   300 * time.Millisecond,
+
+		videoConfirmTimeout:  1200 * time.Millisecond,
+		videoConfirmPoll:     100 * time.Millisecond,
+		videoConfirmMinDelta: 5,
 	}
+}
+
+func (c *AVMediaClient) SetVideoCounter(counter func() uint64) {
+	c.mu.Lock()
+	c.videoCounter = counter
+	c.mu.Unlock()
 }
 
 func (c *AVMediaClient) StreamStart(ctx context.Context, audioPort, videoPort int) error {
@@ -51,10 +66,15 @@ func (c *AVMediaClient) StreamStart(ctx context.Context, audioPort, videoPort in
 		logger.Warnf(tag, "stream start rejected reason=invalid_ports audio=%d video=%d", audioPort, videoPort)
 		return errors.New("invalid av stream ports")
 	}
+	baseline := c.currentVideoCount()
 	video := openwebnetproto.BuildAVAddStreamVideo(c.streamIP, videoPort, c.highRes)
 	if err := c.sendCommand(ctx, "add-video-stream", video); err != nil {
-		logger.Errorf(tag, "add-video-stream failed audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
-		return err
+		if c.waitForVideoFlow(ctx, baseline) {
+			logger.Warnf(tag, "add-video-stream failed but video is flowing audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
+		} else {
+			logger.Errorf(tag, "add-video-stream failed audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
+			return err
+		}
 	}
 	select {
 	case <-ctx.Done():
@@ -154,4 +174,43 @@ func isAllACKs(reply string) bool {
 		reply = strings.TrimPrefix(reply, openwebnetproto.FrameACK)
 	}
 	return true
+}
+
+func (c *AVMediaClient) currentVideoCount() uint64 {
+	c.mu.Lock()
+	counter := c.videoCounter
+	c.mu.Unlock()
+	if counter == nil {
+		return 0
+	}
+	return counter()
+}
+
+func (c *AVMediaClient) waitForVideoFlow(ctx context.Context, baseline uint64) bool {
+	c.mu.Lock()
+	counter := c.videoCounter
+	timeout := c.videoConfirmTimeout
+	poll := c.videoConfirmPoll
+	minDelta := c.videoConfirmMinDelta
+	c.mu.Unlock()
+
+	if counter == nil {
+		return false
+	}
+
+	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+
+	for {
+		if counter() >= baseline+minDelta {
+			return true
+		}
+		select {
+		case <-deadlineCtx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
 }

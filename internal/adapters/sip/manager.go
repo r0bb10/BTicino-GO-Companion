@@ -393,7 +393,7 @@ func (m *Manager) StreamStart(ctx context.Context, devAddr string) error {
 	offerSDP := m.offerSDP(target.AddDevAddr, streamDevAddr)
 	inviteReq.SetBody([]byte(offerSDP))
 	logger.Debugf(tag, "invite prepared uri=%s destination=%s transport=%s add_devaddr=%v sdp_devaddr=%s from=%s auth_user=%s", target.URI.String(), target.Destination, strings.ToUpper(normalizeTransport(m.cfg.MediaSIPTransport)), target.AddDevAddr, strings.TrimSpace(streamDevAddr), strings.TrimSpace(m.cfg.MediaSIPFrom), inviteAuthUser(m.cfg))
-	logger.Debugf(tag, "offer sdp\n%s", strings.TrimSpace(offerSDP))
+	logger.Debugf(tag, "offer sdp body=%q", strings.TrimSpace(offerSDP))
 
 	callCtx, cancel := context.WithTimeout(ctx, sipAnswerTimeout)
 	defer cancel()

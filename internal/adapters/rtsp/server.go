@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
@@ -83,6 +84,9 @@ type Server struct {
 
 	onVideoPacketRTP func(*rtp.Packet)
 	onAudioPacketRTP func(*rtp.Packet)
+
+	videoIngestCount uint64
+	audioIngestCount uint64
 }
 
 func NewServer(cfg config.Config, lifecycle Lifecycle) *Server {
@@ -205,9 +209,11 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	s.mu.Unlock()
 
 	startCtx, cancel := context.WithTimeout(context.Background(), streamAutostartTimeout)
+	s.OnStreamStarted()
 	err := s.transport.OnPlay(startCtx, sessionID, entrypointID, devAddr)
 	cancel()
 	if err != nil {
+		s.OnStreamStopped()
 		logger.Warnf(tag, "stream autostart failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
 		return &base.Response{StatusCode: base.StatusBadRequest}, nil
 	}
@@ -379,6 +385,7 @@ func (s *Server) runIngestListener(ctx context.Context, port int, mediaType desc
 		}
 		if isExpectedPayloadType(mediaType, pkt.PayloadType) {
 			validPackets++
+			s.incrementIngestCount(mediaType)
 			if validPackets == 1 {
 				logger.Infof(tag, "ingest first_packet media=%v port=%d pt=%d seq=%d ts=%d ssrc=%d", mediaType, port, pkt.PayloadType, pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC)
 			} else if time.Since(lastCountLog) >= 5*time.Second {
@@ -646,22 +653,27 @@ func (s *Server) BeginSnapshotMirror() (int, func(), error) {
 	logger.Debugf(tag, "snapshot mirror started port=%d", port)
 
 	stop := func() {
-		s.mu.Lock()
-		if s.snapshotMirrorConn == conn {
-			_ = s.snapshotMirrorConn.Close()
-			s.snapshotMirrorConn = nil
-			s.snapshotMirrorPort = 0
-			s.snapshotMirrorReady = false
-			s.snapshotMirrorSPS = false
-			s.snapshotMirrorPPS = false
-			s.snapshotMirrorWarmupDoneFrames = 0
-			s.snapshotMirrorWaitForIDR = false
-			logger.Debugf(tag, "snapshot mirror stopped port=%d", port)
-		}
-		s.mu.Unlock()
+		s.clearSnapshotMirrorConn(conn, "stopped")
 	}
 
 	return port, stop, nil
+}
+
+func (s *Server) clearSnapshotMirrorConn(conn *net.UDPConn, reason string) {
+	s.mu.Lock()
+	if s.snapshotMirrorConn == conn {
+		port := s.snapshotMirrorPort
+		_ = s.snapshotMirrorConn.Close()
+		s.snapshotMirrorConn = nil
+		s.snapshotMirrorPort = 0
+		s.snapshotMirrorReady = false
+		s.snapshotMirrorSPS = false
+		s.snapshotMirrorPPS = false
+		s.snapshotMirrorWarmupDoneFrames = 0
+		s.snapshotMirrorWaitForIDR = false
+		logger.Debugf(tag, "snapshot mirror closed port=%d reason=%s", port, strings.TrimSpace(reason))
+	}
+	s.mu.Unlock()
 }
 
 func (s *Server) writeSnapshotMirror(pkt *rtp.Packet) {
@@ -716,6 +728,10 @@ func (s *Server) writeSnapshotMirror(pkt *rtp.Packet) {
 		return
 	}
 	if _, err := conn.Write(raw); err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			s.clearSnapshotMirrorConn(conn, "receiver_closed")
+			return
+		}
 		logger.Warnf(tag, "snapshot mirror write failed err=%v", err)
 	}
 }
@@ -926,4 +942,22 @@ func sortedRoutePaths(routes map[string]entrypoint.StreamRoute) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+func (s *Server) incrementIngestCount(mediaType description.MediaType) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if mediaType == description.MediaTypeVideo {
+		s.videoIngestCount++
+		return
+	}
+	if mediaType == description.MediaTypeAudio {
+		s.audioIngestCount++
+	}
+}
+
+func (s *Server) VideoIngestCount() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.videoIngestCount
 }

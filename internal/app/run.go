@@ -300,6 +300,7 @@ func Run(ctx context.Context, cfgPath string) error {
 	var webrtcSvc *webrtc.Service
 	if cfg.MediaRTSPEnabled {
 		rtspServer = rtspadapter.NewServer(cfg, mediaService)
+		avBackend.SetVideoCounter(func() uint64 { return rtspServer.VideoIngestCount() })
 		snapshotService = snapshot.New(cfg, mediaService, rtspServer)
 		webrtcSvc, err = webrtc.New(mediaService, rtspServer, cfg.Entrypoints, cfg.IceServers)
 		if err != nil {

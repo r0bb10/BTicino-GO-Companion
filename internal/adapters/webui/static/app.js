@@ -7,20 +7,47 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function apiGet(url) {
-  return fetch(url, { credentials: 'same-origin' }).then(function(r) { return r.json(); }).then(function(data) {
-    try { sessionStorage.setItem('cache:' + url, JSON.stringify(data)); } catch (e) {}
-    return data;
+function apiRequest(url, opts) {
+  opts = opts || {};
+  var fetchOpts = {
+    method: opts.method || 'GET',
+    credentials: 'same-origin',
+    headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
+    body: opts.body ? JSON.stringify(opts.body) : undefined
+  };
+  return fetch(url, fetchOpts).then(function(r) {
+    return r.text().then(function(text) {
+      var data = {};
+      if (text) {
+        try { data = JSON.parse(text); } catch (e) { data = { error: text }; }
+      }
+      if (!r.ok) {
+        var err = new Error(data.error || r.statusText || 'Request failed');
+        err.status = r.status;
+        err.data = data;
+        throw err;
+      }
+      if (opts.cache) {
+        try { sessionStorage.setItem('cache:' + url, JSON.stringify(data)); } catch (e) {}
+      }
+      return data;
+    });
   });
 }
 
-function apiPost(url, data) {
-  return fetch(url, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
-  }).then(function(r) { return r.json(); });
+function apiGet(url, opts) { return apiRequest(url, opts); }
+function apiPost(url, data) { return apiRequest(url, { method: 'POST', body: data }); }
+function apiPut(url, data) { return apiRequest(url, { method: 'PUT', body: data }); }
+
+function handleApiError(err, fallback) {
+  if (err && (err.status === 401 || err.status === 403)) {
+    _session = null;
+    stopPolling();
+    show('loginView');
+    showToast(err.message || 'Authentication required', 'error');
+    return;
+  }
+  if (fallback) showToast(fallback, 'error');
 }
 
 function getCached(url) {
@@ -106,11 +133,11 @@ function buildNav() {
 
 /* ──── Session ──── */
 function checkSession() {
-  return apiGet('/api/session').then(function(session) {
+  return apiGet('/api/session', { cache: true }).then(function(session) {
     _session = session;
     if (!session.authenticated) {
       var help = document.getElementById('loginHelp');
-      if (session.bootstrap) {
+      if (session.bootstrap_required) {
         help.innerHTML = 'First login uses <strong>companion / companion</strong>, then you must replace the default credentials.';
         help.style.display = 'block';
       } else {
@@ -126,9 +153,9 @@ function checkSession() {
     show('appView');
     buildNav();
     switchPage('about');
-  }).catch(function() {
+  }).catch(function(err) {
     show('loginView');
-    showToast('Failed to connect', 'error');
+    showToast(err.message || 'Failed to connect', 'error');
   });
 }
 
@@ -162,8 +189,8 @@ function submitLogin(event) {
     }
     btn.textContent = 'Sign In';
     checkSession();
-  }).catch(function() {
-    errEl.textContent = 'Connection error';
+  }).catch(function(err) {
+    errEl.textContent = err.message || 'Connection error';
     errEl.classList.add('visible');
     btn.disabled = false;
     btn.textContent = 'Sign In';
@@ -195,8 +222,8 @@ function submitSetup(event) {
     btn.textContent = 'Save Credentials';
     show('loginView');
     document.getElementById('loginForm').reset();
-  }).catch(function() {
-    errEl.textContent = 'Connection error';
+  }).catch(function(err) {
+    errEl.textContent = err.message || 'Connection error';
     errEl.classList.add('visible');
     btn.disabled = false;
     btn.textContent = 'Save Credentials';
@@ -209,8 +236,8 @@ function logout() {
     _session = null;
     show('loginView');
     document.getElementById('loginForm').reset();
-  }).catch(function() {
-    showToast('Logout failed', 'error');
+  }).catch(function(err) {
+    showToast(err.message || 'Logout failed', 'error');
   });
 }
 
@@ -218,10 +245,10 @@ function logout() {
 function renderAbout() {
   var cached = getCached('/api/session');
   if (cached) renderAboutData(cached);
-  apiGet('/api/session').then(renderAboutData).catch(function() {});
+  apiGet('/api/session', { cache: true }).then(renderAboutData).catch(function(err) { handleApiError(err); });
   var cachedStatus = getCached('/api/status');
   if (cachedStatus) renderStatusData(cachedStatus);
-  apiGet('/api/status').then(renderStatusData).catch(function() {});
+  apiGet('/api/status', { cache: true }).then(renderStatusData).catch(function(err) { handleApiError(err); });
 }
 
 function renderAboutData(session) {
@@ -274,7 +301,7 @@ var _logPrevContent = '';
 
 function startPolling(page) {
   stopPolling();
-  if (page === 'logs') { fetchLogs(); _logTimer = setInterval(fetchLogs, 3000); }
+  if (page === 'logs') { loadLoggingState(); fetchLogs(); _logTimer = setInterval(fetchLogs, 3000); }
   if (page === 'busframes') { fetchFrames(); _frameTimer = setInterval(fetchFrames, 2000); }
 }
 
@@ -297,7 +324,41 @@ switchPage = function(pageId) {
 /* ──── Log viewer ──── */
 function fetchLogs() {
   if (_logPaused) return;
-  apiGet('/api/logs').then(renderLogs).catch(function() {});
+  apiGet('/api/logs').then(renderLogs).catch(function(err) { handleApiError(err, 'Failed to load logs'); });
+}
+
+function loadLoggingState() {
+  apiGet('/api/logging').then(function(data) {
+    var runtimeLevel = document.getElementById('logRuntimeLevel');
+    if (runtimeLevel && data.level) runtimeLevel.value = data.level;
+  }).catch(function(err) { handleApiError(err, 'Failed to load logger state'); });
+}
+
+function setLoggingLevel(level) {
+  apiPut('/api/logging', { level: level }).then(function(data) {
+    var runtimeLevel = document.getElementById('logRuntimeLevel');
+    if (runtimeLevel && data.level) runtimeLevel.value = data.level;
+    showToast('Log level set to ' + data.level.toUpperCase(), 'success');
+  }).catch(function(err) {
+    handleApiError(err, 'Failed to update logger level');
+    loadLoggingState();
+  });
+}
+
+function highlightText(text, query) {
+  if (!query) return escapeHtml(text);
+  var lower = text.toLowerCase();
+  var needle = query.toLowerCase();
+  var pos = 0;
+  var out = '';
+  while (true) {
+    var idx = lower.indexOf(needle, pos);
+    if (idx === -1) break;
+    out += escapeHtml(text.substring(pos, idx));
+    out += '<mark class="log-highlight">' + escapeHtml(text.substring(idx, idx + query.length)) + '</mark>';
+    pos = idx + query.length;
+  }
+  return out + escapeHtml(text.substring(pos));
 }
 
 function renderLogs(data) {
@@ -306,7 +367,7 @@ function renderLogs(data) {
   var raw = data.log;
   if (raw === _logPrevContent) return;
   _logPrevContent = raw;
-  var filter = document.getElementById('logLevelFilter').value;
+  var query = document.getElementById('logSearch').value.trim();
   var lines = raw.split('\n');
   var html = '';
   for (var i = 0; i < lines.length; i++) {
@@ -316,8 +377,7 @@ function renderLogs(data) {
     if (/\[E\]/.test(line)) cls = 'log-line-error';
     else if (/\[W\]/.test(line)) cls = 'log-line-warn';
     else if (/\[D\]/.test(line)) cls = 'log-line-debug';
-    if (filter && line.indexOf('[' + filter + ']') === -1) continue;
-    html += '<span class="' + cls + '">' + escapeHtml(line) + '</span>\n';
+    html += '<span class="' + cls + '">' + highlightText(line, query) + '</span>\n';
   }
   pre.innerHTML = html;
   var out = document.getElementById('logOutput');
@@ -330,7 +390,11 @@ function toggleLogPause() {
   if (!_logPaused) fetchLogs();
 }
 
-document.getElementById('logLevelFilter').addEventListener('change', function() {
+document.getElementById('logRuntimeLevel').addEventListener('change', function(event) {
+  setLoggingLevel(event.target.value);
+});
+
+document.getElementById('logSearch').addEventListener('input', function() {
   _logPrevContent = '';
   fetchLogs();
 });
@@ -338,7 +402,7 @@ document.getElementById('logLevelFilter').addEventListener('change', function() 
 /* ──── BUS Frame viewer ──── */
 function fetchFrames() {
   if (_framePaused) return;
-  apiGet('/api/frames').then(renderFrames).catch(function() {});
+  apiGet('/api/frames').then(renderFrames).catch(function(err) { handleApiError(err, 'Failed to load BUS frames'); });
 }
 
 function renderFrames(data) {
