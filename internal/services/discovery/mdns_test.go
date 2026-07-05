@@ -130,7 +130,7 @@ func TestNormalizeNameAndTXT(t *testing.T) {
 func TestStartDisabledReturnsImmediately(t *testing.T) {
 	cfg := config.Default()
 	cfg.MDNSEnabled = false
-	if err := Start(context.Background(), cfg, nil, nil, nil); err != nil {
+	if err := Start(context.Background(), cfg, nil, nil); err != nil {
 		t.Fatalf("expected disabled mdns start to return nil, got %v", err)
 	}
 }

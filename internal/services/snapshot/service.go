@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,8 +15,11 @@ import (
 
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/entrypoint"
+	"bticino-go-companion/internal/logger"
 	"bticino-go-companion/internal/services/media"
 )
+
+const tag = "services.snapshot"
 
 const (
 	defaultCaptureTimeout = 10 * time.Second
@@ -46,7 +48,6 @@ type mirrorDriver interface {
 type Service struct {
 	stream         streamDriver
 	mirror         mirrorDriver
-	logger         *log.Logger
 	snapshotsDir   string
 	entrypoints    map[string]entrypoint.Model
 	captureTimeout time.Duration
@@ -55,7 +56,7 @@ type Service struct {
 	captureMu sync.Mutex
 }
 
-func New(cfg config.Config, stream streamDriver, mirror mirrorDriver, logger *log.Logger) *Service {
+func New(cfg config.Config, stream streamDriver, mirror mirrorDriver) *Service {
 	index := make(map[string]entrypoint.Model, len(cfg.Entrypoints))
 	for _, ep := range cfg.Entrypoints {
 		id := strings.TrimSpace(ep.ID)
@@ -64,61 +65,72 @@ func New(cfg config.Config, stream streamDriver, mirror mirrorDriver, logger *lo
 		}
 		index[id] = ep
 	}
-	return &Service{
+	svc := &Service{
 		stream:         stream,
 		mirror:         mirror,
-		logger:         logger,
 		snapshotsDir:   filepath.Join(cfg.DataDir, "media", "snapshots"),
 		entrypoints:    index,
 		captureTimeout: defaultCaptureTimeout,
 		gstBinary:      "gst-launch-1.0",
 	}
+	logger.Infof(tag, "service ready entrypoints=%d dir=%s timeout=%s", len(index), svc.snapshotsDir, svc.captureTimeout)
+	return svc
 }
 
 func (s *Service) Capture(ctx context.Context, entrypointID string) ([]byte, error) {
 	ep, err := s.entrypoint(entrypointID)
 	if err != nil {
+		logger.Warnf(tag, "capture rejected entrypoint=%s err=%v", strings.TrimSpace(entrypointID), err)
 		return nil, err
 	}
 	if s.stream == nil || s.mirror == nil {
+		logger.Warnf(tag, "capture unavailable entrypoint=%s stream_set=%t mirror_set=%t", ep.ID, s.stream != nil, s.mirror != nil)
 		return nil, ErrSnapshotUnavailable
 	}
 	if !s.captureMu.TryLock() {
+		logger.Warnf(tag, "capture skipped entrypoint=%s reason=busy", ep.ID)
 		return nil, ErrSnapshotBusy
 	}
 	defer s.captureMu.Unlock()
+	logger.Infof(tag, "capture starting entrypoint=%s", ep.ID)
 
 	if err := os.MkdirAll(s.snapshotsDir, 0o755); err != nil {
+		logger.Errorf(tag, "capture failed entrypoint=%s step=prepare_dir err=%v", ep.ID, err)
 		return nil, fmt.Errorf("prepare snapshot directory: %w", err)
 	}
 
 	before := s.stream.Snapshot()
 	if before.StreamActive && before.ActiveEntrypoint != "" && before.ActiveEntrypoint != ep.ID {
+		logger.Warnf(tag, "capture blocked entrypoint=%s active_entrypoint=%s", ep.ID, before.ActiveEntrypoint)
 		return nil, ErrActiveEntrypointBlocked
 	}
 
 	startedBySnapshot := false
 	if !before.StreamActive {
 		if err := s.stream.StartForEntrypoint(ctx, ep.ID, ep.DevAddr); err != nil {
+			logger.Warnf(tag, "capture failed entrypoint=%s step=start_stream err=%v", ep.ID, err)
 			return nil, err
 		}
 		startedBySnapshot = true
+		logger.Debugf(tag, "capture started stream entrypoint=%s", ep.ID)
 	}
 	if startedBySnapshot {
 		defer func() {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := s.stream.StopForEntrypoint(stopCtx, ep.ID); err != nil {
-				s.logf("snapshot stream stop warning entrypoint=%s err=%v", ep.ID, err)
+				logger.Warnf(tag, "stream stop failed entrypoint=%s err=%v", ep.ID, err)
 			}
 		}()
 	}
 
 	port, stopMirror, err := s.mirror.BeginSnapshotMirror()
 	if err != nil {
+		logger.Warnf(tag, "capture failed entrypoint=%s step=begin_mirror err=%v", ep.ID, err)
 		return nil, err
 	}
 	defer stopMirror()
+	logger.Debugf(tag, "capture mirror ready entrypoint=%s port=%d", ep.ID, port)
 
 	finalPath := s.pathForEntrypoint(ep.ID)
 	tmpPath := finalPath + ".tmp"
@@ -128,23 +140,29 @@ func (s *Service) Capture(ctx context.Context, entrypointID string) ([]byte, err
 	defer cancel()
 	if err := s.runCapturePipeline(captureCtx, port, tmpPath); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(captureCtx.Err(), context.DeadlineExceeded) {
+			logger.Warnf(tag, "capture timed out entrypoint=%s timeout=%s", ep.ID, s.captureTimeout)
 			return nil, ErrSnapshotTimeout
 		}
+		logger.Warnf(tag, "capture failed entrypoint=%s step=pipeline err=%v", ep.ID, err)
 		return nil, err
 	}
 
 	info, err := os.Stat(tmpPath)
 	if err != nil || info.Size() <= 0 {
+		logger.Warnf(tag, "capture failed entrypoint=%s step=stat_tmp err=%v", ep.ID, err)
 		return nil, ErrSnapshotTimeout
 	}
 
 	if err := os.Rename(tmpPath, finalPath); err != nil {
+		logger.Errorf(tag, "capture failed entrypoint=%s step=publish err=%v", ep.ID, err)
 		return nil, fmt.Errorf("publish snapshot: %w", err)
 	}
 	image, err := os.ReadFile(finalPath)
 	if err != nil {
+		logger.Errorf(tag, "capture failed entrypoint=%s step=read_final err=%v", ep.ID, err)
 		return nil, err
 	}
+	logger.Infof(tag, "capture complete entrypoint=%s bytes=%d path=%s", ep.ID, len(image), finalPath)
 	return image, nil
 }
 
@@ -156,6 +174,7 @@ func (s *Service) Latest(entrypointID string) (string, error) {
 	path := s.pathForEntrypoint(ep.ID)
 	info, err := os.Stat(path)
 	if err != nil || info.Size() <= 0 {
+		logger.Debugf(tag, "latest not found entrypoint=%s path=%s err=%v", ep.ID, path, err)
 		return "", ErrSnapshotNotFound
 	}
 	return path, nil
@@ -180,6 +199,7 @@ func (s *Service) runCapturePipeline(ctx context.Context, port int, outputPath s
 		"filesink", "sync=false", fmt.Sprintf("location=%s", outputPath),
 	}
 	cmd := exec.CommandContext(ctx, s.gstBinary, args...)
+	logger.Debugf(tag, "pipeline starting port=%d output=%s binary=%s", port, outputPath, s.gstBinary)
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -221,6 +241,7 @@ func (s *Service) runCapturePipeline(ctx context.Context, port int, outputPath s
 				_ = cmd.Process.Kill()
 			}
 			<-waitCh
+			logger.Debugf(tag, "pipeline stopped by context output=%s err=%v", outputPath, ctx.Err())
 			return ctx.Err()
 		case <-poll.C:
 			ok, err := isCompleteJPEG(outputPath)
@@ -228,6 +249,7 @@ func (s *Service) runCapturePipeline(ctx context.Context, port int, outputPath s
 				continue
 			}
 			captured = true
+			logger.Debugf(tag, "pipeline captured complete jpeg output=%s", outputPath)
 			if cmd.Process != nil {
 				_ = cmd.Process.Kill()
 			}
@@ -252,12 +274,6 @@ func (s *Service) entrypoint(id string) (entrypoint.Model, error) {
 		return entrypoint.Model{}, ErrCapabilityNotEnabled
 	}
 	return ep, nil
-}
-
-func (s *Service) logf(format string, args ...any) {
-	if s.logger != nil {
-		s.logger.Printf(format, args...)
-	}
 }
 
 func isCompleteJPEG(path string) (bool, error) {

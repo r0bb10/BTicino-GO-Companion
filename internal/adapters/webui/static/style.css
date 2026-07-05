@@ -154,7 +154,8 @@ a:hover { color: var(--primary-hover); }
 .container { scrollbar-width: none; }
 
 .page { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-#logsPage > .card { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#logsPage > .card,
+#busframesPage > .card { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .page-title { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
 .page-desc { color: var(--text-light); margin-bottom: 20px; font-size: 14px; }
 
@@ -400,6 +401,33 @@ a:hover { color: var(--primary-hover); }
 .log-line-info { color: #d4d4d4; }
 .log-line-warn { color: #ffa726; }
 .log-line-error { color: #ef5350; }
+
+/* Frame viewer */
+.frames-output {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: 'Courier New', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 12px;
+  border-radius: 4px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.frame-entry {
+  display: flex;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid #333;
+  font-size: 12px;
+}
+.frame-entry:last-child { border-bottom: none; }
+.frame-time { color: #888; white-space: nowrap; flex-shrink: 0; width: 70px; }
+.frame-system { color: #4fc3f7; white-space: nowrap; flex-shrink: 0; width: 40px; }
+.frame-raw { color: #d4d4d4; word-break: break-all; }
+.frame-mapped { color: #81c784; white-space: nowrap; flex-shrink: 0; margin-left: auto; }
+.frame-entry-err { color: #ef5350; }
 
 /* Hide scrollbar but keep scrollable */
 .no-scrollbar {

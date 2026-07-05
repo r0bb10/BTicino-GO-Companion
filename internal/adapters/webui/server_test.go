@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/logger"
 )
 
 func TestBootstrapLoginCannotAccessConfigUntilCredentialsAreSet(t *testing.T) {
@@ -89,6 +90,46 @@ func TestLogsRequireConfiguredSession(t *testing.T) {
 	decodeBody(t, resp, &payload)
 	if !strings.Contains(payload["log"], "hello log") {
 		t.Fatalf("expected log contents, got %q", payload["log"])
+	}
+}
+
+func TestLoggingEndpointRequiresConfiguredSessionAndUpdatesLevel(t *testing.T) {
+	configPath, logPath := writeTestFiles(t)
+	bootstrapConfiguredAuth(t, configPath, "admin", "supersecret")
+	originalLevel := logger.GetLevel()
+	logger.SetLevel(logger.INFO)
+	t.Cleanup(func() { logger.SetLevel(originalLevel) })
+	srv := httptest.NewServer(New(Options{ConfigPath: configPath, LogPath: logPath}).Handler())
+	t.Cleanup(srv.Close)
+
+	resp := doJSON(t, srv.URL+"/api/logging", http.MethodGet, nil, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated logging 401, got %d", resp.StatusCode)
+	}
+	_ = readBody(t, resp)
+
+	loginResp := doJSON(t, srv.URL+"/api/login", http.MethodPost, map[string]string{"username": "admin", "password": "supersecret"}, nil)
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("login failed: %d body=%s", loginResp.StatusCode, readBody(t, loginResp))
+	}
+	cookie := sessionFromResponse(t, loginResp)
+
+	resp = doJSON(t, srv.URL+"/api/logging", http.MethodGet, nil, cookie)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected logging 200, got %d body=%s", resp.StatusCode, readBody(t, resp))
+	}
+	var payload map[string]any
+	decodeBody(t, resp, &payload)
+	if payload["level"] != "info" || payload["path"] != logPath {
+		t.Fatalf("unexpected logging response: %#v", payload)
+	}
+
+	resp = doJSON(t, srv.URL+"/api/logging", http.MethodPut, map[string]string{"level": "debug"}, cookie)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected logging update 200, got %d body=%s", resp.StatusCode, readBody(t, resp))
+	}
+	if logger.GetLevel() != logger.DEBUG {
+		t.Fatalf("expected debug level, got %s", logger.GetLevel().String())
 	}
 }
 

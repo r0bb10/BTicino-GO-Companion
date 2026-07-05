@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"sort"
 	"strings"
@@ -19,8 +18,11 @@ import (
 
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/entrypoint"
+	"bticino-go-companion/internal/logger"
 	"bticino-go-companion/internal/services/audiobridge"
 )
+
+const tag = "adapters.rtsp"
 
 const (
 	streamAutostartTimeout = 12 * time.Second
@@ -52,8 +54,7 @@ type readerInfo struct {
 }
 
 type Server struct {
-	cfg    config.Config
-	logger *log.Logger
+	cfg config.Config
 
 	transport *Transport
 
@@ -84,18 +85,17 @@ type Server struct {
 	onAudioPacketRTP func(*rtp.Packet)
 }
 
-func NewServer(cfg config.Config, logger *log.Logger, lifecycle Lifecycle) *Server {
+func NewServer(cfg config.Config, lifecycle Lifecycle) *Server {
 	paths := entrypoint.RTSPRoutes(cfg.Entrypoints)
 
 	s := &Server{
 		cfg:         cfg,
-		logger:      logger,
 		transport:   NewTransport(lifecycle),
 		readers:     map[*gortsplib.ServerSession]readerInfo{},
 		paths:       paths,
 		pathList:    sortedRoutePaths(paths),
 		returnAudio: newReturnAudioForwarder(btReturnAudioAddr),
-		audioBridge: audiobridge.New(audiobridge.DefaultConfig(cfg.DataDir), logger),
+		audioBridge: audiobridge.New(audiobridge.DefaultConfig(cfg.DataDir)),
 	}
 	s.srv = &gortsplib.Server{
 		Handler:        s,
@@ -110,7 +110,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.srv.Start(); err != nil {
 		return fmt.Errorf("start rtsp server: %w", err)
 	}
-	s.logf("rtsp server started addr=%s paths=%v", s.cfg.MediaRTSPAddress, s.pathList)
+	logger.Infof(tag, "server started addr=%s paths=%v", s.cfg.MediaRTSPAddress, s.pathList)
 
 	if err := s.ensureStaticStream(); err != nil {
 		s.srv.Close()
@@ -130,7 +130,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		if err := s.srv.Wait(); err != nil {
-			s.logf("rtsp server stopped: %v", err)
+			logger.Infof(tag, "server stopped err=%v", err)
 		}
 	}()
 
@@ -150,11 +150,13 @@ func (s *Server) Start(ctx context.Context) error {
 
 func (s *Server) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
 	if !s.isKnownPath(ctx.Path) {
+		logger.Debugf(tag, "describe rejected path=%s reason=unknown_path", ctx.Path)
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.stream == nil {
+		logger.Warnf(tag, "describe rejected path=%s reason=stream_unavailable", ctx.Path)
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
 	return &base.Response{StatusCode: base.StatusOK}, s.stream, nil
@@ -162,6 +164,7 @@ func (s *Server) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Re
 
 func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
 	if !s.isKnownPath(ctx.Path) {
+		logger.Debugf(tag, "setup rejected path=%s reason=unknown_path", ctx.Path)
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
 	if ctx.Session.State() == gortsplib.ServerSessionStatePreRecord {
@@ -171,6 +174,7 @@ func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.stream == nil {
+		logger.Warnf(tag, "setup rejected path=%s reason=stream_unavailable", ctx.Path)
 		return &base.Response{StatusCode: base.StatusNotFound}, nil, nil
 	}
 	return &base.Response{StatusCode: base.StatusOK}, s.stream, nil
@@ -179,11 +183,11 @@ func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response
 func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
 	entrypointID, devAddr, ok := s.resolveEntrypoint(ctx.Path)
 	if !ok {
-		s.logf("rtsp play rejected path=%s reason=unknown_path", ctx.Path)
+		logger.Warnf(tag, "play rejected path=%s reason=unknown_path", ctx.Path)
 		return &base.Response{StatusCode: base.StatusNotFound}, nil
 	}
 	sessionID := sessionID(ctx.Session)
-	s.logf("rtsp play request session=%s path=%s entrypoint=%s devaddr=%s", sessionID, ctx.Path, entrypointID, devAddr)
+	logger.Infof(tag, "play request session=%s path=%s entrypoint=%s devaddr=%s", sessionID, ctx.Path, entrypointID, devAddr)
 
 	s.mu.Lock()
 	if existing, exists := s.readers[ctx.Session]; exists {
@@ -191,11 +195,11 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 			existing.LastSeen = time.Now()
 			s.readers[ctx.Session] = existing
 			s.mu.Unlock()
-			s.logf("rtsp play noop session=%s entrypoint=%s reason=already_reader", sessionID, entrypointID)
+			logger.Debugf(tag, "play noop session=%s entrypoint=%s reason=already_reader", sessionID, entrypointID)
 			return &base.Response{StatusCode: base.StatusOK}, nil
 		}
 		s.mu.Unlock()
-		s.logf("rtsp play rejected session=%s entrypoint=%s existing_entrypoint=%s reason=session_entrypoint_mismatch", sessionID, entrypointID, existing.EntrypointID)
+		logger.Warnf(tag, "play rejected session=%s entrypoint=%s existing_entrypoint=%s reason=session_entrypoint_mismatch", sessionID, entrypointID, existing.EntrypointID)
 		return &base.Response{StatusCode: base.StatusBadRequest}, nil
 	}
 	s.mu.Unlock()
@@ -204,7 +208,7 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	err := s.transport.OnPlay(startCtx, sessionID, entrypointID, devAddr)
 	cancel()
 	if err != nil {
-		s.logf("rtsp stream autostart failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
+		logger.Warnf(tag, "stream autostart failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
 		return &base.Response{StatusCode: base.StatusBadRequest}, nil
 	}
 
@@ -216,7 +220,7 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 		LastSeen:     time.Now(),
 	}
 	s.mu.Unlock()
-	s.logf("rtsp play accepted session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
+	logger.Infof(tag, "play accepted session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
 
 	ctx.Session.OnPacketRTPAny(func(medi *description.Media, _ format.Format, pkt *rtp.Packet) {
 		if medi != s.backMed {
@@ -229,7 +233,7 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 }
 
 func (s *Server) OnPause(ctx *gortsplib.ServerHandlerOnPauseCtx) (*base.Response, error) {
-	s.logf("rtsp pause request session=%s", sessionID(ctx.Session))
+	logger.Debugf(tag, "pause request session=%s", sessionID(ctx.Session))
 	s.removeReader(ctx.Session)
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
@@ -245,7 +249,7 @@ func (s *Server) OnSetParameter(ctx *gortsplib.ServerHandlerOnSetParameterCtx) (
 }
 
 func (s *Server) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
-	s.logf("rtsp session close session=%s", sessionID(ctx.Session))
+	logger.Debugf(tag, "session close session=%s", sessionID(ctx.Session))
 	s.removeReader(ctx.Session)
 }
 
@@ -337,19 +341,19 @@ func (s *Server) runIngestListener(ctx context.Context, port int, mediaType desc
 	}
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
 	if err != nil {
-		s.logf("rtsp ingest listener failed media=%v port=%d err=%v", mediaType, port, err)
+		logger.Warnf(tag, "ingest listener failed media=%v port=%d err=%v", mediaType, port, err)
 		return
 	}
 	defer conn.Close()
 	_ = conn.SetReadBuffer(1 << 20)
-	s.logf("rtsp ingest listener started media=%v addr=%s", mediaType, conn.LocalAddr().String())
+	logger.Infof(tag, "ingest listener started media=%v addr=%s", mediaType, conn.LocalAddr().String())
 
 	buf := make([]byte, 2048)
 	validPackets := 0
 	lastCountLog := time.Now()
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-			s.logf("rtsp ingest set deadline failed media=%v err=%v", mediaType, err)
+			logger.Warnf(tag, "ingest set deadline failed media=%v err=%v", mediaType, err)
 		}
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
@@ -366,7 +370,7 @@ func (s *Server) runIngestListener(ctx context.Context, port int, mediaType desc
 				return
 			default:
 			}
-			s.logf("rtsp ingest read error media=%v port=%d err=%v", mediaType, port, err)
+			logger.Warnf(tag, "ingest read error media=%v port=%d err=%v", mediaType, port, err)
 			continue
 		}
 		var pkt rtp.Packet
@@ -376,9 +380,9 @@ func (s *Server) runIngestListener(ctx context.Context, port int, mediaType desc
 		if isExpectedPayloadType(mediaType, pkt.PayloadType) {
 			validPackets++
 			if validPackets == 1 {
-				s.logf("rtsp ingest first_packet media=%v port=%d pt=%d seq=%d ts=%d ssrc=%d", mediaType, port, pkt.PayloadType, pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC)
+				logger.Infof(tag, "ingest first_packet media=%v port=%d pt=%d seq=%d ts=%d ssrc=%d", mediaType, port, pkt.PayloadType, pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC)
 			} else if time.Since(lastCountLog) >= 5*time.Second {
-				s.logf("rtsp ingest packets media=%v port=%d count=%d last_seq=%d last_ts=%d", mediaType, port, validPackets, pkt.SequenceNumber, pkt.Timestamp)
+				logger.Debugf(tag, "ingest packets media=%v port=%d count=%d last_seq=%d last_ts=%d", mediaType, port, validPackets, pkt.SequenceNumber, pkt.Timestamp)
 				lastCountLog = time.Now()
 			}
 		}
@@ -395,7 +399,7 @@ func (s *Server) writeIngestPacket(mediaType description.MediaType, pkt *rtp.Pac
 	}
 	if mediaType == description.MediaTypeAudio && s.audioBridge.Enabled() {
 		if err := s.audioBridge.WriteIntercomSpeex(pkt); err != nil {
-			s.logf("audio bridge ingest failed: %v", err)
+			logger.Warnf(tag, "audio bridge ingest failed err=%v", err)
 		}
 		return
 	}
@@ -430,7 +434,7 @@ func (s *Server) writeIngestPacket(mediaType description.MediaType, pkt *rtp.Pac
 		return
 	}
 	if err := stream.WritePacketRTP(media, pkt); err != nil {
-		s.logf("rtsp ingest write packet error: %v", err)
+		logger.Debugf(tag, "ingest write packet failed media=%v err=%v", mediaType, err)
 	}
 }
 
@@ -462,7 +466,7 @@ func (s *Server) forwardReturnAudio(sess *gortsplib.ServerSession, pkt *rtp.Pack
 			return
 		}
 		if err := s.audioBridge.WriteBackchannelOpus(pkt); err != nil {
-			s.logf("rtsp backchannel bridge write failed: %v", err)
+			logger.Warnf(tag, "backchannel bridge write failed err=%v", err)
 		}
 		return
 	}
@@ -470,14 +474,14 @@ func (s *Server) forwardReturnAudio(sess *gortsplib.ServerSession, pkt *rtp.Pack
 		return
 	}
 	if err := s.returnAudio.WriteRTP(pkt); err != nil {
-		s.logf("rtsp backchannel forward failed: %v", err)
+		logger.Warnf(tag, "backchannel forward failed err=%v", err)
 	}
 }
 
 func (s *Server) runBridgeOpusOutListener(ctx context.Context, port int, expectedPayloadType uint8) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
 	if err != nil {
-		s.logf("audio bridge opus output listener failed port=%d err=%v", port, err)
+		logger.Warnf(tag, "audio bridge opus output listener failed port=%d err=%v", port, err)
 		return
 	}
 	defer conn.Close()
@@ -486,7 +490,7 @@ func (s *Server) runBridgeOpusOutListener(ctx context.Context, port int, expecte
 	buf := make([]byte, 2048)
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-			s.logf("audio bridge opus output deadline failed err=%v", err)
+			logger.Warnf(tag, "audio bridge opus output deadline failed err=%v", err)
 		}
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
@@ -503,7 +507,7 @@ func (s *Server) runBridgeOpusOutListener(ctx context.Context, port int, expecte
 				return
 			default:
 			}
-			s.logf("audio bridge opus output read failed err=%v", err)
+			logger.Warnf(tag, "audio bridge opus output read failed err=%v", err)
 			continue
 		}
 
@@ -526,7 +530,7 @@ func (s *Server) runBridgeOpusOutListener(ctx context.Context, port int, expecte
 			continue
 		}
 		if err := stream.WritePacketRTP(audioMed, &pkt); err != nil {
-			s.logf("audio bridge opus stream write failed: %v", err)
+			logger.Debugf(tag, "audio bridge opus stream write failed err=%v", err)
 		}
 	}
 }
@@ -562,7 +566,7 @@ func (s *Server) OpusPayloadType() uint8 {
 func (s *Server) runBridgeSpeexOutListener(ctx context.Context, port int) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
 	if err != nil {
-		s.logf("audio bridge speex output listener failed port=%d err=%v", port, err)
+		logger.Warnf(tag, "audio bridge speex output listener failed port=%d err=%v", port, err)
 		return
 	}
 	defer conn.Close()
@@ -571,7 +575,7 @@ func (s *Server) runBridgeSpeexOutListener(ctx context.Context, port int) {
 	buf := make([]byte, 2048)
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-			s.logf("audio bridge speex output deadline failed err=%v", err)
+			logger.Warnf(tag, "audio bridge speex output deadline failed err=%v", err)
 		}
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
@@ -588,7 +592,7 @@ func (s *Server) runBridgeSpeexOutListener(ctx context.Context, port int) {
 				return
 			default:
 			}
-			s.logf("audio bridge speex output read failed err=%v", err)
+			logger.Warnf(tag, "audio bridge speex output read failed err=%v", err)
 			continue
 		}
 
@@ -600,7 +604,7 @@ func (s *Server) runBridgeSpeexOutListener(ctx context.Context, port int) {
 			continue
 		}
 		if err := s.returnAudio.WriteRTP(&pkt); err != nil {
-			s.logf("audio bridge speex forward failed: %v", err)
+			logger.Warnf(tag, "audio bridge speex forward failed err=%v", err)
 		}
 	}
 }
@@ -614,11 +618,13 @@ func (s *Server) closeReturnAudio() {
 func (s *Server) BeginSnapshotMirror() (int, func(), error) {
 	port, err := reserveLocalUDPPort()
 	if err != nil {
+		logger.Warnf(tag, "snapshot mirror failed step=reserve_port err=%v", err)
 		return 0, nil, err
 	}
 	dst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}
 	conn, err := net.DialUDP("udp4", nil, dst)
 	if err != nil {
+		logger.Warnf(tag, "snapshot mirror failed step=dial port=%d err=%v", port, err)
 		return 0, nil, err
 	}
 
@@ -626,6 +632,7 @@ func (s *Server) BeginSnapshotMirror() (int, func(), error) {
 	if s.snapshotMirrorConn != nil {
 		s.mu.Unlock()
 		_ = conn.Close()
+		logger.Warnf(tag, "snapshot mirror rejected reason=busy existing_port=%d", s.snapshotMirrorPort)
 		return 0, nil, ErrSnapshotMirrorBusy
 	}
 	s.snapshotMirrorConn = conn
@@ -636,6 +643,7 @@ func (s *Server) BeginSnapshotMirror() (int, func(), error) {
 	s.snapshotMirrorWarmupDoneFrames = 0
 	s.snapshotMirrorWaitForIDR = false
 	s.mu.Unlock()
+	logger.Debugf(tag, "snapshot mirror started port=%d", port)
 
 	stop := func() {
 		s.mu.Lock()
@@ -648,6 +656,7 @@ func (s *Server) BeginSnapshotMirror() (int, func(), error) {
 			s.snapshotMirrorPPS = false
 			s.snapshotMirrorWarmupDoneFrames = 0
 			s.snapshotMirrorWaitForIDR = false
+			logger.Debugf(tag, "snapshot mirror stopped port=%d", port)
 		}
 		s.mu.Unlock()
 	}
@@ -665,9 +674,15 @@ func (s *Server) writeSnapshotMirror(pkt *rtp.Packet) {
 	if !s.snapshotMirrorReady {
 		sawSPS, sawPPS, sawIDR := inspectH264NALTypes(pkt.Payload)
 		if sawSPS {
+			if !s.snapshotMirrorSPS {
+				logger.Debugf(tag, "snapshot mirror saw SPS port=%d", s.snapshotMirrorPort)
+			}
 			s.snapshotMirrorSPS = true
 		}
 		if sawPPS {
+			if !s.snapshotMirrorPPS {
+				logger.Debugf(tag, "snapshot mirror saw PPS port=%d", s.snapshotMirrorPort)
+			}
 			s.snapshotMirrorPPS = true
 		}
 		if !s.snapshotMirrorSPS || !s.snapshotMirrorPPS {
@@ -692,19 +707,24 @@ func (s *Server) writeSnapshotMirror(pkt *rtp.Packet) {
 			s.snapshotMirrorWaitForIDR = false
 		}
 		s.snapshotMirrorReady = true
+		logger.Debugf(tag, "snapshot mirror ready port=%d", s.snapshotMirrorPort)
 	}
 	s.mu.Unlock()
 	raw, err := pkt.Marshal()
 	if err != nil {
+		logger.Warnf(tag, "snapshot mirror marshal failed err=%v", err)
 		return
 	}
-	_, _ = conn.Write(raw)
+	if _, err := conn.Write(raw); err != nil {
+		logger.Warnf(tag, "snapshot mirror write failed err=%v", err)
+	}
 }
 
 func (s *Server) closeSnapshotMirror() {
 	s.mu.Lock()
 	if s.snapshotMirrorConn != nil {
 		_ = s.snapshotMirrorConn.Close()
+		logger.Debugf(tag, "snapshot mirror closed during shutdown port=%d", s.snapshotMirrorPort)
 		s.snapshotMirrorConn = nil
 		s.snapshotMirrorPort = 0
 		s.snapshotMirrorReady = false
@@ -797,7 +817,7 @@ func (s *Server) watchReaderSessions(ctx context.Context) {
 			}
 			s.mu.RUnlock()
 			for _, sess := range stale {
-				s.logf("rtsp reader watchdog closing stale session idle_for=%s", readerIdleTimeout)
+				logger.Warnf(tag, "reader watchdog closing stale session idle_for=%s", readerIdleTimeout)
 				s.removeReader(sess)
 				sess.Close()
 			}
@@ -816,10 +836,10 @@ func (s *Server) removeReader(sess *gortsplib.ServerSession) {
 	}
 	s.mu.Unlock()
 	if ok {
-		s.logf("rtsp reader remove session=%s entrypoint=%s devaddr=%s", info.SessionID, info.EntrypointID, info.DevAddr)
+		logger.Debugf(tag, "reader remove session=%s entrypoint=%s devaddr=%s", info.SessionID, info.EntrypointID, info.DevAddr)
 		stopCtx, cancel := context.WithTimeout(context.Background(), streamAutostopTimeout)
 		if err := s.transport.OnPause(stopCtx, info.SessionID); err != nil {
-			s.logf("rtsp reader pause lifecycle failed session=%s err=%v", info.SessionID, err)
+			logger.Warnf(tag, "reader pause lifecycle failed session=%s err=%v", info.SessionID, err)
 		}
 		cancel()
 	}
@@ -836,7 +856,7 @@ func (s *Server) OnStreamStarted() {
 		return
 	}
 	if err := s.audioBridge.Start(bridgeCtx); err != nil {
-		s.logf("audio bridge start failed: %v", err)
+		logger.Warnf(tag, "audio bridge start failed err=%v", err)
 	}
 }
 
@@ -845,12 +865,13 @@ func (s *Server) OnStreamStopped() {
 		return
 	}
 	if err := s.audioBridge.Stop(context.Background()); err != nil {
-		s.logf("audio bridge stop failed: %v", err)
+		logger.Warnf(tag, "audio bridge stop failed err=%v", err)
 	}
 }
 
 func (s *Server) touchReader(sess *gortsplib.ServerSession) {
 	if sess == nil {
+		logger.Debugf(tag, "reader touch skipped reason=nil_session")
 		return
 	}
 	s.mu.Lock()
@@ -862,6 +883,8 @@ func (s *Server) touchReader(sess *gortsplib.ServerSession) {
 	s.mu.Unlock()
 	if ok {
 		s.transport.OnGetParameter(info.SessionID)
+	} else {
+		logger.Debugf(tag, "reader touch skipped session=%s reason=not_reader", sessionID(sess))
 	}
 }
 
@@ -882,12 +905,6 @@ func (s *Server) isKnownPath(path string) bool {
 
 func sessionID(session *gortsplib.ServerSession) string {
 	return fmt.Sprintf("%p", session)
-}
-
-func (s *Server) logf(format string, args ...any) {
-	if s.logger != nil {
-		s.logger.Printf(format, args...)
-	}
 }
 
 func (s *Server) videoPacketCallback() func(*rtp.Packet) {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -12,14 +11,14 @@ import (
 	"time"
 
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/logger"
 	openwebnetproto "bticino-go-companion/internal/protocol/openwebnet"
 )
 
+const tag = "adapters.openwebnet.av"
+
 var ErrAVCommandRejected = errors.New("av endpoint rejected command")
 
-// AVMediaClient talks to bt_ipcamera over raw TCP. This is the media routing
-// channel used by c300x-controller; SIP starts the AV pipeline, then these
-// add-stream commands select the RTP destination consumed by our RTSP ingest.
 type AVMediaClient struct {
 	addr         string
 	streamIP     string
@@ -29,13 +28,12 @@ type AVMediaClient struct {
 	retryDelay   time.Duration
 	maxAttempts  int
 	audioDelay   time.Duration
-	logger       *log.Logger
 
 	mu   sync.Mutex
 	conn net.Conn
 }
 
-func NewAVMediaClient(cfg config.Config, logger *log.Logger) *AVMediaClient {
+func NewAVMediaClient(cfg config.Config) *AVMediaClient {
 	return &AVMediaClient{
 		addr:         net.JoinHostPort(strings.TrimSpace(cfg.MediaAVEndpointHost), strconv.Itoa(cfg.MediaAVEndpointPort)),
 		streamIP:     "127.0.0.1",
@@ -45,16 +43,17 @@ func NewAVMediaClient(cfg config.Config, logger *log.Logger) *AVMediaClient {
 		retryDelay:   time.Second,
 		maxAttempts:  3,
 		audioDelay:   300 * time.Millisecond,
-		logger:       logger,
 	}
 }
 
 func (c *AVMediaClient) StreamStart(ctx context.Context, audioPort, videoPort int) error {
 	if audioPort <= 0 || videoPort <= 0 {
+		logger.Warnf(tag, "stream start rejected reason=invalid_ports audio=%d video=%d", audioPort, videoPort)
 		return errors.New("invalid av stream ports")
 	}
 	video := openwebnetproto.BuildAVAddStreamVideo(c.streamIP, videoPort, c.highRes)
 	if err := c.sendCommand(ctx, "add-video-stream", video); err != nil {
+		logger.Errorf(tag, "add-video-stream failed audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
 		return err
 	}
 	select {
@@ -63,12 +62,11 @@ func (c *AVMediaClient) StreamStart(ctx context.Context, audioPort, videoPort in
 	case <-time.After(c.audioDelay):
 	}
 
-	// Audio is best-effort: devices may already start it themselves and NAK a
-	// duplicate add. Video is the load-bearing stream for RTSP/WebRTC startup.
 	audio := openwebnetproto.BuildAVAddStreamAudio(c.streamIP, audioPort)
 	if err := c.sendCommand(ctx, "add-audio-stream", audio); err != nil {
-		c.logf("av add-audio-stream failed (continuing with video): %v", err)
+		logger.Warnf(tag, "add-audio-stream failed audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
 	}
+	logger.Infof(tag, "stream start complete audio_port=%d video_port=%d highres=%t", audioPort, videoPort, c.highRes)
 	return nil
 }
 
@@ -85,20 +83,23 @@ func (c *AVMediaClient) sendCommand(ctx context.Context, label, frame string) er
 		reply, err := c.exchange(frame)
 		if err != nil {
 			lastErr = err
-			c.logf("av %s attempt %d/%d transport error: %v", label, attempt, c.maxAttempts, err)
+			logger.Debugf(tag, "command attempt failed label=%s attempt=%d/%d err=%v", label, attempt, c.maxAttempts, err)
 			continue
 		}
-		c.logf("av %s attempt %d/%d frame=%q reply=%q", label, attempt, c.maxAttempts, frame, reply)
+		logger.Debugf(tag, "command reply label=%s attempt=%d/%d frame=%q reply=%q", label, attempt, c.maxAttempts, frame, reply)
 		if isAllACKs(reply) {
 			return nil
 		}
 		if reply == openwebnetproto.FrameNACK {
 			lastErr = fmt.Errorf("%w: NAK", ErrAVCommandRejected)
+			logger.Debugf(tag, "command rejected label=%s attempt=%d/%d reply=NAK", label, attempt, c.maxAttempts)
 			continue
 		}
 		c.closeConn()
 		lastErr = fmt.Errorf("%w: unexpected reply %q", ErrAVCommandRejected, reply)
+		logger.Debugf(tag, "command rejected label=%s attempt=%d/%d reply=%q", label, attempt, c.maxAttempts, reply)
 	}
+	logger.Warnf(tag, "command failed label=%s attempts=%d err=%v", label, c.maxAttempts, lastErr)
 	return fmt.Errorf("av %s failed after %d attempts: %w", label, c.maxAttempts, lastErr)
 }
 
@@ -139,12 +140,6 @@ func (c *AVMediaClient) closeConnLocked() {
 	if c.conn != nil {
 		_ = c.conn.Close()
 		c.conn = nil
-	}
-}
-
-func (c *AVMediaClient) logf(format string, args ...any) {
-	if c.logger != nil {
-		c.logger.Printf(format, args...)
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,8 +19,11 @@ import (
 	"time"
 
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/logger"
 	"golang.org/x/mod/semver"
 )
+
+const tag = "services.update"
 
 const (
 	StageIdle       = "idle"
@@ -79,7 +81,6 @@ type Manager struct {
 	mu sync.RWMutex
 
 	cfg      config.Config
-	logger   *log.Logger
 	healthFn func(context.Context) error
 	restart  func() error
 	now      func() time.Time
@@ -89,10 +90,9 @@ type Manager struct {
 	rollbackToVersion string
 }
 
-func NewManager(cfg config.Config, logger *log.Logger, healthFn func(context.Context) error) *Manager {
+func NewManager(cfg config.Config, healthFn func(context.Context) error) *Manager {
 	m := &Manager{
 		cfg:      cfg,
-		logger:   logger,
 		healthFn: healthFn,
 		now: func() time.Time {
 			return time.Now().UTC()
@@ -196,13 +196,16 @@ func (m *Manager) Apply(override *Artifact) (Status, error) {
 		candidate = *m.status.Available
 	default:
 		m.mu.Unlock()
+		logger.Warnf(tag, "apply rejected reason=no_available_update")
 		return m.Status(), ErrNoAvailableUpdate
 	}
+	logger.Infof(tag, "apply starting version=%s artifact=%s", strings.TrimSpace(candidate.Version), strings.TrimSpace(candidate.Path))
 	m.setStageLocked(StageApplying, "")
 	m.status.RestartRequired = true
 	m.mu.Unlock()
 
 	if err := m.applyBinary(candidate); err != nil {
+		logger.Errorf(tag, "apply failed step=binary version=%s err=%v", strings.TrimSpace(candidate.Version), err)
 		m.mu.Lock()
 		m.setStageLocked(StageFailed, err.Error())
 		out := m.status
@@ -222,7 +225,10 @@ func (m *Manager) Apply(override *Artifact) (Status, error) {
 	m.mu.Unlock()
 
 	if err := m.restart(); err != nil {
-		_, _ = m.rollbackInternal("restart failed: " + err.Error())
+		logger.Errorf(tag, "restart failed after apply err=%v rollback=starting", err)
+		if _, rollbackErr := m.rollbackInternal("restart failed: " + err.Error()); rollbackErr != nil {
+			logger.Errorf(tag, "rollback after restart failure failed err=%v", rollbackErr)
+		}
 		m.mu.Lock()
 		m.setStageLocked(StageFailed, err.Error())
 		out := m.status
@@ -231,7 +237,10 @@ func (m *Manager) Apply(override *Artifact) (Status, error) {
 	}
 
 	if err := m.healthWindowCheck(); err != nil {
-		_, _ = m.rollbackInternal("health check failed: " + err.Error())
+		logger.Errorf(tag, "health check failed after apply err=%v rollback=starting", err)
+		if _, rollbackErr := m.rollbackInternal("health check failed: " + err.Error()); rollbackErr != nil {
+			logger.Errorf(tag, "rollback after health failure failed err=%v", rollbackErr)
+		}
 		m.mu.Lock()
 		m.setStageLocked(StageFailed, err.Error())
 		out := m.status
@@ -244,6 +253,7 @@ func (m *Manager) Apply(override *Artifact) (Status, error) {
 	m.setStageLocked(StageHealthy, "")
 	out := m.status
 	m.mu.Unlock()
+	logger.Infof(tag, "apply complete version=%s", strings.TrimSpace(out.CurrentVersion))
 	return out, nil
 }
 
@@ -260,6 +270,7 @@ func (m *Manager) Rollback() (Status, error) {
 }
 
 func (m *Manager) rollbackInternal(reason string) (Status, error) {
+	logger.Warnf(tag, "rollback starting reason=%s", strings.TrimSpace(reason))
 	m.mu.Lock()
 	m.setStageLocked(StageRollback, reason)
 	m.status.RestartRequired = true
@@ -269,16 +280,20 @@ func (m *Manager) rollbackInternal(reason string) (Status, error) {
 	current := m.cfg.UpdateBinCurrentPath()
 
 	if _, err := os.Stat(prev); err != nil {
+		logger.Errorf(tag, "rollback failed reason=missing_previous path=%s err=%v", prev, err)
 		return m.Status(), ErrNoPreviousBinary
 	}
 	if err := copyFile(prev, current, 0o755); err != nil {
+		logger.Errorf(tag, "rollback failed step=restore_previous from=%s to=%s err=%v", prev, current, err)
 		return m.Status(), fmt.Errorf("restore previous binary: %w", err)
 	}
 
 	if err := m.restart(); err != nil {
+		logger.Errorf(tag, "rollback failed step=restart err=%v", err)
 		return m.Status(), err
 	}
 	if err := m.healthWindowCheck(); err != nil {
+		logger.Errorf(tag, "rollback failed step=health err=%v", err)
 		return m.Status(), err
 	}
 
@@ -289,11 +304,13 @@ func (m *Manager) rollbackInternal(reason string) (Status, error) {
 	m.setStageLocked(StageHealthy, "")
 	out := m.status
 	m.mu.Unlock()
+	logger.Infof(tag, "rollback complete version=%s", strings.TrimSpace(out.CurrentVersion))
 	return out, nil
 }
 
 func (m *Manager) applyBinary(candidate Artifact) error {
 	if strings.TrimSpace(candidate.Path) == "" {
+		logger.Warnf(tag, "apply binary rejected reason=missing_artifact")
 		return ErrMissingArtifact
 	}
 	archivePath, cleanup, err := m.resolveArtifact(candidate.Path)
@@ -306,6 +323,7 @@ func (m *Manager) applyBinary(candidate Artifact) error {
 		return fmt.Errorf("candidate artifact not found: %w", err)
 	}
 	if err := verifySHA256(archivePath, candidate.SHA256); err != nil {
+		logger.Errorf(tag, "artifact verification failed path=%s err=%v", archivePath, err)
 		return err
 	}
 	candidatePath, cleanupCandidate, err := extractCompanionBinary(archivePath)
@@ -326,19 +344,24 @@ func (m *Manager) applyBinary(candidate Artifact) error {
 	}
 
 	if err := copyFile(candidatePath, tmpCandidate, 0o755); err != nil {
+		logger.Errorf(tag, "copy candidate failed from=%s to=%s err=%v", candidatePath, tmpCandidate, err)
 		return fmt.Errorf("copy candidate: %w", err)
 	}
 	if err := os.Rename(tmpCandidate, candidateFinal); err != nil {
+		logger.Errorf(tag, "promote candidate failed from=%s to=%s err=%v", tmpCandidate, candidateFinal, err)
 		return fmt.Errorf("promote candidate: %w", err)
 	}
 	if _, err := os.Stat(current); err == nil {
 		if err := copyFile(current, prev, 0o755); err != nil {
+			logger.Errorf(tag, "copy previous failed from=%s to=%s err=%v", current, prev, err)
 			return fmt.Errorf("copy previous: %w", err)
 		}
 	}
 	if err := copyFile(candidateFinal, current, 0o755); err != nil {
+		logger.Errorf(tag, "activate candidate failed from=%s to=%s err=%v", candidateFinal, current, err)
 		return fmt.Errorf("activate candidate: %w", err)
 	}
+	logger.Infof(tag, "binary activated artifact=%s current=%s previous=%s", archivePath, current, prev)
 	return nil
 }
 
@@ -542,9 +565,15 @@ func (m *Manager) setStageLocked(stage string, msg string) {
 	m.status.Stage = stage
 	m.status.LastError = strings.TrimSpace(msg)
 	m.status.CanRollback = hasFile(m.cfg.UpdateBinPreviousPath())
-	if m.logger != nil {
-		m.logger.Printf("update stage=%s err=%s restart_required=%t", stage, m.status.LastError, m.status.RestartRequired)
+	if stage == StageChecking {
+		logger.Debugf(tag, "stage=%s restart_required=%t can_rollback=%t", stage, m.status.RestartRequired, m.status.CanRollback)
+		return
 	}
+	if m.status.LastError != "" || stage == StageFailed || stage == StageRollback {
+		logger.Warnf(tag, "stage=%s err=%s restart_required=%t can_rollback=%t", stage, m.status.LastError, m.status.RestartRequired, m.status.CanRollback)
+		return
+	}
+	logger.Infof(tag, "stage=%s restart_required=%t can_rollback=%t", stage, m.status.RestartRequired, m.status.CanRollback)
 }
 
 func verifySHA256(path string, expected string) error {

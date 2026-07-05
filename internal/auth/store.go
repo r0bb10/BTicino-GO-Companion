@@ -59,6 +59,7 @@ type Store struct {
 	state             persistedState
 	challenges        map[string]Challenge
 	repairCode        repairCodeState
+	lastBearerSeenAt  time.Time
 }
 
 type repairCodeState struct {
@@ -108,15 +109,23 @@ func (s *Store) NeedsClaim() bool {
 }
 
 func (s *Store) ValidateBearer(token string) error {
+	normalized := strings.TrimSpace(token)
+	s.mu.RLock()
+	valid := s.hasClaimedBearerLocked() && subtle.ConstantTimeCompare([]byte(normalized), []byte(s.state.BearerToken)) == 1
+	s.mu.RUnlock()
+	if !valid {
+		return ErrInvalidCredential
+	}
+	s.mu.Lock()
+	s.lastBearerSeenAt = time.Now()
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Store) LastBearerValidatedAt() time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if !s.hasClaimedBearerLocked() {
-		return ErrInvalidCredential
-	}
-	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(token)), []byte(s.state.BearerToken)) != 1 {
-		return ErrInvalidCredential
-	}
-	return nil
+	return s.lastBearerSeenAt
 }
 
 func (s *Store) CurrentKeyID() string {

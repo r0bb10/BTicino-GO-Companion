@@ -2,8 +2,6 @@ package rtspadapter
 
 import (
 	"context"
-	"io"
-	"log"
 	"net"
 	"strings"
 	"testing"
@@ -52,7 +50,7 @@ func TestServerPathAndLifecycleHooks(t *testing.T) {
 	}
 
 	rec := &lifecycleRecorder{}
-	s := NewServer(cfg, log.New(io.Discard, "", 0), rec)
+	s := NewServer(cfg, rec)
 
 	if !s.isKnownPath("/doorbell-gate1") || !s.isKnownPath("/doorbell-gate2") || s.isKnownPath("/doorbell") || s.isKnownPath("/unknown") {
 		t.Fatal("unexpected path match behavior")
@@ -94,7 +92,7 @@ func TestServerOnPlayIsIdempotentPerSession(t *testing.T) {
 	}
 
 	rec := &lifecycleRecorder{}
-	s := NewServer(cfg, log.New(io.Discard, "", 0), rec)
+	s := NewServer(cfg, rec)
 	session := &gortsplib.ServerSession{}
 
 	if _, err := s.OnPlay(&gortsplib.ServerHandlerOnPlayCtx{Path: "/doorbell-gate1", Session: session}); err != nil {
@@ -118,7 +116,7 @@ func TestServerOnPlayIsIdempotentPerSession(t *testing.T) {
 func TestServerDescribeUnknownPath(t *testing.T) {
 	cfg := config.Default()
 	rec := &lifecycleRecorder{}
-	s := NewServer(cfg, log.New(io.Discard, "", 0), rec)
+	s := NewServer(cfg, rec)
 
 	resp, _, err := s.OnDescribe(&gortsplib.ServerHandlerOnDescribeCtx{Path: "/unknown"})
 	if err != nil {
@@ -134,7 +132,7 @@ func TestServerHelperFunctions(t *testing.T) {
 	cfg.Entrypoints = []entrypoint.Model{
 		{ID: "main", DevAddr: "20", HasStream: true},
 	}
-	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+	s := NewServer(cfg, &lifecycleRecorder{})
 
 	if id, dev, ok := s.resolveEntrypoint("/doorbell-main"); !ok || id != "main" || dev != "20" {
 		t.Fatalf("unexpected resolveEntrypoint result: id=%q dev=%q ok=%v", id, dev, ok)
@@ -271,7 +269,7 @@ func TestServerForwardsOnlyActiveBackchannelRTP(t *testing.T) {
 	defer conn.Close()
 
 	cfg := config.Default()
-	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+	s := NewServer(cfg, &lifecycleRecorder{})
 	s.returnAudio = newReturnAudioForwarder(conn.LocalAddr().String())
 	s.audioBridge = nil
 	defer s.closeReturnAudio()
@@ -305,7 +303,7 @@ func TestServerForwardsOnlyActiveBackchannelRTP(t *testing.T) {
 
 func TestServerWritesBackchannelToBridgeWhenEnabled(t *testing.T) {
 	cfg := config.Default()
-	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+	s := NewServer(cfg, &lifecycleRecorder{})
 	bridgeCfg := audiobridge.DefaultConfig(cfg.DataDir)
 	bridgeCfg.Enabled = true
 	ports := bridgeCfg.Ports
@@ -316,7 +314,7 @@ func TestServerWritesBackchannelToBridgeWhenEnabled(t *testing.T) {
 	}
 	defer conn.Close()
 
-	s.audioBridge = audiobridge.New(bridgeCfg, log.New(io.Discard, "", 0))
+	s.audioBridge = audiobridge.New(bridgeCfg)
 	session := &gortsplib.ServerSession{}
 	s.readers[session] = readerInfo{SessionID: "s1", EntrypointID: "main", DevAddr: "20"}
 
@@ -399,7 +397,7 @@ func TestInspectH264NALTypes(t *testing.T) {
 
 func TestSnapshotMirrorWaitsForWarmupAndIDR(t *testing.T) {
 	cfg := config.Default()
-	s := NewServer(cfg, log.New(io.Discard, "", 0), &lifecycleRecorder{})
+	s := NewServer(cfg, &lifecycleRecorder{})
 
 	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {

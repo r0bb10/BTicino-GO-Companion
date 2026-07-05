@@ -3,8 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,7 +22,7 @@ func TestRunReturnsLoadConfigErrorOnInvalidJSON(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	err := Run(context.Background(), cfgPath, log.New(io.Discard, "", 0))
+	err := Run(context.Background(), cfgPath)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -198,14 +196,14 @@ func TestSelfHealthCheckNon200(t *testing.T) {
 }
 
 func TestEnrichConfigWithDiagnosticMetadataNilInputs(t *testing.T) {
-	if err := enrichConfigWithDiagnosticMetadata(nil, nil, nil); err != nil {
+	if err := enrichConfigWithDiagnosticMetadata(nil, nil); err != nil {
 		t.Fatalf("expected nil input helper to be no-op, got %v", err)
 	}
 	cfg := config.Default()
-	if err := enrichConfigWithDiagnosticMetadata(&cfg, nil, log.New(io.Discard, "", 0)); err != nil {
-		t.Fatalf("expected nil command client to be no-op, got %v", err)
+	if err := enrichConfigWithDiagnosticMetadata(&cfg, nil); err != nil {
+		t.Fatalf("enrichConfigWithDiagnosticMetadata failed: %v", err)
 	}
-	if err := enrichConfigWithDiagnosticMetadataWithRetry(&cfg, nil, log.New(io.Discard, "", 0)); err != nil {
+	if err := enrichConfigWithDiagnosticMetadataWithRetry(&cfg, nil); err != nil {
 		t.Fatalf("expected retry helper with nil command client to be no-op, got %v", err)
 	}
 }

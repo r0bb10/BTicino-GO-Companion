@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,7 +19,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := app.Run(ctx, cfgPath, log.Default()); err != nil {
-		log.Fatalf("companion failed: %v", err)
+	if err := app.Run(ctx, cfgPath); err != nil {
+		fmt.Fprintf(os.Stderr, "companion failed: %v\n", err)
+		os.Exit(1)
 	}
 }

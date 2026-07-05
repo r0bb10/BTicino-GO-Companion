@@ -5,19 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
 	"bticino-go-companion/internal/domain/entrypoint"
+	"bticino-go-companion/internal/logger"
 	"bticino-go-companion/internal/system"
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
+
+const tag = "services.webrtc"
 
 const (
 	defaultGatherTimeout = 5 * time.Second
@@ -71,7 +73,6 @@ type pendingCandidateBatch struct {
 }
 
 type Service struct {
-	logger      *log.Logger
 	stream      StreamLifecycle
 	backchannel BackchannelWriter
 
@@ -103,11 +104,7 @@ type session struct {
 	closeOnce            sync.Once
 }
 
-func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWriter, entrypoints []entrypoint.Model, iceServers []string) (*Service, error) {
-	if logger == nil {
-		logger = log.Default()
-	}
-
+func New(stream StreamLifecycle, backchannel BackchannelWriter, entrypoints []entrypoint.Model, iceServers []string) (*Service, error) {
 	me := &webrtc.MediaEngine{}
 	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
@@ -167,7 +164,6 @@ func New(logger *log.Logger, stream StreamLifecycle, backchannel BackchannelWrit
 	}
 
 	return &Service{
-		logger:            logger,
 		stream:            stream,
 		backchannel:       backchannel,
 		sessions:          map[string]*session{},
@@ -182,24 +178,24 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	sessionID = strings.TrimSpace(sessionID)
 	entrypointID = strings.TrimSpace(entrypointID)
 	offerSDP = canonicalizeSDP(offerSDP)
-	s.logf("webrtc offer request session=%s entrypoint=%s offer_len=%d", sessionID, entrypointID, len(offerSDP))
+	logger.Infof(tag, "offer request session=%s entrypoint=%s offer_len=%d", sessionID, entrypointID, len(offerSDP))
 
 	if sessionID == "" {
-		s.logf("webrtc offer rejected reason=missing_session")
+		logger.Warnf(tag, "offer rejected reason=missing_session")
 		return OfferResult{}, ErrSessionIDRequired
 	}
 	if entrypointID == "" {
-		s.logf("webrtc offer rejected session=%s reason=missing_entrypoint", sessionID)
+		logger.Warnf(tag, "offer rejected session=%s reason=missing_entrypoint", sessionID)
 		return OfferResult{}, ErrEntrypointRequired
 	}
 	if offerSDP == "" {
-		s.logf("webrtc offer rejected session=%s entrypoint=%s reason=missing_offer", sessionID, entrypointID)
+		logger.Warnf(tag, "offer rejected session=%s entrypoint=%s reason=missing_offer", sessionID, entrypointID)
 		return OfferResult{}, ErrOfferRequired
 	}
 
 	devAddr, ok := s.devAddrMap[entrypointID]
 	if !ok {
-		s.logf("webrtc offer rejected session=%s entrypoint=%s reason=entrypoint_not_found", sessionID, entrypointID)
+		logger.Warnf(tag, "offer rejected session=%s entrypoint=%s reason=entrypoint_not_found", sessionID, entrypointID)
 		return OfferResult{}, ErrEntrypointNotFound
 	}
 
@@ -207,7 +203,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	s.prunePendingCandidatesLocked(time.Now())
 	if _, exists := s.sessions[sessionID]; exists {
 		s.mu.Unlock()
-		s.logf("webrtc offer rejected session=%s reason=session_exists", sessionID)
+		logger.Warnf(tag, "offer rejected session=%s reason=session_exists", sessionID)
 		return OfferResult{}, ErrSessionExists
 	}
 	s.mu.Unlock()
@@ -216,10 +212,10 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	defer cancel()
 
 	if err := s.stream.ReaderJoin(offerCtx, sessionID, entrypointID, devAddr); err != nil {
-		s.logf("webrtc reader join failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
+		logger.Warnf(tag, "reader join failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
 		return OfferResult{}, err
 	}
-	s.logf("webrtc reader joined session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
+	logger.Infof(tag, "reader joined session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
 	joined := true
 	defer func() {
 		if joined {
@@ -284,7 +280,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		s.logf("webrtc connection state session=%s state=%s", sess.id, state.String())
+		logger.Infof(tag, "connection state session=%s state=%s", sess.id, state.String())
 		switch state {
 		case webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateFailed:
 			s.closeSession(sess.id)
@@ -299,9 +295,19 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	})
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-		if track == nil || track.Kind() != webrtc.RTPCodecTypeAudio || s.backchannel == nil {
+		if track == nil {
+			logger.Debugf(tag, "remote track ignored session=%s reason=nil_track", sess.id)
 			return
 		}
+		if track.Kind() != webrtc.RTPCodecTypeAudio {
+			logger.Debugf(tag, "remote track ignored session=%s kind=%s reason=not_audio", sess.id, track.Kind().String())
+			return
+		}
+		if s.backchannel == nil {
+			logger.Warnf(tag, "remote audio track ignored session=%s reason=backchannel_unavailable", sess.id)
+			return
+		}
+		logger.Debugf(tag, "remote audio track accepted session=%s", sess.id)
 		go s.forwardBackchannel(track)
 	})
 
@@ -310,6 +316,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	})
 	if err != nil {
 		_ = pc.Close()
+		logger.Warnf(tag, "add video transceiver failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("add video transceiver: %w", err)
 	}
 	audioTransceiver, err := pc.AddTransceiverFromTrack(audioTrack, webrtc.RTPTransceiverInit{
@@ -317,6 +324,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	})
 	if err != nil {
 		_ = pc.Close()
+		logger.Warnf(tag, "add audio transceiver failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("add audio transceiver: %w", err)
 	}
 	go drainRTCP(videoTransceiver.Sender())
@@ -326,11 +334,13 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	if _, exists := s.sessions[sessionID]; exists {
 		s.mu.Unlock()
 		_ = pc.Close()
+		logger.Warnf(tag, "offer rejected session=%s reason=session_race", sessionID)
 		return OfferResult{}, ErrSessionExists
 	}
 	if pending, ok := s.pendingCandidates[sessionID]; ok && len(pending.candidates) > 0 {
 		sess.pendingRemoteICE = append(sess.pendingRemoteICE, pending.candidates...)
 		delete(s.pendingCandidates, sessionID)
+		logger.Debugf(tag, "moved pending candidates session=%s count=%d", sessionID, len(pending.candidates))
 	}
 	s.sessions[sessionID] = sess
 	s.mu.Unlock()
@@ -338,26 +348,26 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerSDP}
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		s.closeSession(sessionID)
-		s.logf("webrtc set remote description failed session=%s err=%v", sessionID, err)
+		logger.Warnf(tag, "set remote description failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("set remote description: %w", err)
 	}
-	s.logf("webrtc remote description set session=%s", sessionID)
+	logger.Debugf(tag, "remote description set session=%s", sessionID)
 	if err := s.flushPendingRemoteCandidates(sess); err != nil {
 		s.closeSession(sessionID)
-		s.logf("webrtc apply queued candidates failed session=%s err=%v", sessionID, err)
+		logger.Warnf(tag, "apply queued candidates failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("apply queued candidates: %w", err)
 	}
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		s.closeSession(sessionID)
-		s.logf("webrtc create answer failed session=%s err=%v", sessionID, err)
+		logger.Warnf(tag, "create answer failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("create answer: %w", err)
 	}
 	gatherDone := webrtc.GatheringCompletePromise(pc)
 	if err := pc.SetLocalDescription(answer); err != nil {
 		s.closeSession(sessionID)
-		s.logf("webrtc set local description failed session=%s err=%v", sessionID, err)
+		logger.Warnf(tag, "set local description failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("set local description: %w", err)
 	}
 
@@ -365,14 +375,16 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	case <-gatherDone:
 	case <-offerCtx.Done():
 		s.closeSession(sessionID)
+		logger.Warnf(tag, "ice gathering cancelled session=%s err=%v", sessionID, offerCtx.Err())
 		return OfferResult{}, offerCtx.Err()
 	case <-time.After(defaultGatherTimeout):
+		logger.Warnf(tag, "ice gathering timed out session=%s timeout=%s", sessionID, defaultGatherTimeout)
 	}
 
 	local := pc.LocalDescription()
 	if local == nil || strings.TrimSpace(local.SDP) == "" {
 		s.closeSession(sessionID)
-		s.logf("webrtc local answer missing session=%s", sessionID)
+		logger.Warnf(tag, "local answer missing session=%s", sessionID)
 		return OfferResult{}, errors.New("local answer not available")
 	}
 
@@ -380,7 +392,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	candidates := append([]Candidate(nil), sess.candidates...)
 	sess.mu.Unlock()
 	joined = false
-	s.logf("webrtc offer answered session=%s entrypoint=%s candidates=%d answer_len=%d", sessionID, entrypointID, len(candidates), len(local.SDP))
+	logger.Infof(tag, "offer answered session=%s entrypoint=%s candidates=%d answer_len=%d", sessionID, entrypointID, len(candidates), len(local.SDP))
 
 	return OfferResult{
 		SessionID:    sessionID,
@@ -393,14 +405,14 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 func (s *Service) AddCandidate(sessionID string, candidate Candidate) error {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		s.logf("webrtc candidate rejected reason=missing_session")
+		logger.Warnf(tag, "candidate rejected reason=missing_session")
 		return ErrSessionIDRequired
 	}
 	if strings.TrimSpace(candidate.Candidate) == "" {
-		s.logf("webrtc candidate rejected session=%s reason=missing_candidate", sessionID)
+		logger.Warnf(tag, "candidate rejected session=%s reason=missing_candidate", sessionID)
 		return ErrCandidateRequired
 	}
-	s.logf("webrtc candidate received session=%s mid_set=%v mline_set=%v", sessionID, candidate.SDPMid != nil, candidate.SDPMLineIndex != nil)
+	logger.Debugf(tag, "candidate received session=%s mid_set=%v mline_set=%v", sessionID, candidate.SDPMid != nil, candidate.SDPMLineIndex != nil)
 
 	init := webrtc.ICECandidateInit{
 		Candidate:        candidate.Candidate,
@@ -420,7 +432,7 @@ func (s *Service) AddCandidate(sessionID string, candidate Candidate) error {
 		batch.updatedAt = time.Now()
 		s.pendingCandidates[sessionID] = batch
 		s.mu.Unlock()
-		s.logf("webrtc candidate queued session=%s queued=%d", sessionID, len(batch.candidates))
+		logger.Debugf(tag, "candidate queued session=%s queued=%d", sessionID, len(batch.candidates))
 		return nil
 	}
 	s.mu.Unlock()
@@ -436,17 +448,17 @@ func (s *Service) addCandidateToSession(sess *session, candidate webrtc.ICECandi
 		}
 		queued := len(sess.pendingRemoteICE)
 		sess.mu.Unlock()
-		s.logf("webrtc candidate pending_remote_description session=%s queued=%d", sess.id, queued)
+		logger.Debugf(tag, "candidate pending_remote_description session=%s queued=%d", sess.id, queued)
 		return nil
 	}
 	pc := sess.pc
 	sess.mu.Unlock()
 
 	if err := pc.AddICECandidate(candidate); err != nil {
-		s.logf("webrtc candidate apply failed session=%s err=%v", sess.id, err)
+		logger.Warnf(tag, "candidate apply failed session=%s err=%v", sess.id, err)
 		return err
 	}
-	s.logf("webrtc candidate applied session=%s", sess.id)
+	logger.Debugf(tag, "candidate applied session=%s", sess.id)
 	return nil
 }
 
@@ -462,10 +474,14 @@ func (s *Service) flushPendingRemoteCandidates(sess *session) error {
 	pc := sess.pc
 	sess.mu.Unlock()
 
-	for _, candidate := range pending {
+	for i, candidate := range pending {
 		if err := pc.AddICECandidate(candidate); err != nil {
+			logger.Warnf(tag, "queued candidate apply failed session=%s index=%d total=%d err=%v", sess.id, i+1, len(pending), err)
 			return err
 		}
+	}
+	if len(pending) > 0 {
+		logger.Debugf(tag, "queued candidates applied session=%s count=%d", sess.id, len(pending))
 	}
 	return nil
 }
@@ -486,10 +502,10 @@ func (s *Service) closeSession(sessionID string) error {
 		s.mu.Lock()
 		delete(s.pendingCandidates, sessionID)
 		s.mu.Unlock()
-		s.logf("webrtc close noop session=%s reason=not_found", sessionID)
+		logger.Debugf(tag, "close noop session=%s reason=not_found", sessionID)
 		return nil
 	}
-	s.logf("webrtc close session=%s entrypoint=%s devaddr=%s", sessionID, sess.entrypointID, sess.devAddr)
+	logger.Infof(tag, "close session=%s entrypoint=%s devaddr=%s", sessionID, sess.entrypointID, sess.devAddr)
 
 	sess.closeOnce.Do(func() {
 		s.mu.Lock()
@@ -497,11 +513,11 @@ func (s *Service) closeSession(sessionID string) error {
 		delete(s.pendingCandidates, sessionID)
 		s.mu.Unlock()
 		if err := sess.pc.Close(); err != nil {
-			s.logf("webrtc close peer connection session=%s err=%v", sessionID, err)
+			logger.Warnf(tag, "close peer connection session=%s err=%v", sessionID, err)
 		}
 		if s.stream != nil {
 			if err := s.stream.ReaderLeave(context.Background(), sessionID); err != nil {
-				s.logf("webrtc reader leave failed session=%s err=%v", sessionID, err)
+				logger.Warnf(tag, "reader leave failed session=%s err=%v", sessionID, err)
 			}
 		}
 	})
@@ -516,7 +532,7 @@ func (s *Service) WriteVideoRTP(pkt *rtp.Packet) {
 	s.logVideoPacket(pkt, len(tracks))
 	for _, tr := range tracks {
 		if err := tr.WriteRTP(pkt); err != nil {
-			s.logf("webrtc video write failed: %v", err)
+			logger.Debugf(tag, "video write failed err=%v", err)
 		}
 	}
 }
@@ -529,7 +545,7 @@ func (s *Service) WriteAudioRTP(pkt *rtp.Packet) {
 	s.logAudioPacket(pkt, len(tracks))
 	for _, tr := range tracks {
 		if err := tr.WriteRTP(pkt); err != nil {
-			s.logf("webrtc audio write failed: %v", err)
+			logger.Debugf(tag, "audio write failed err=%v", err)
 		}
 	}
 }
@@ -544,7 +560,7 @@ func (s *Service) logVideoPacket(pkt *rtp.Packet, trackCount int) {
 	}
 	s.mu.Unlock()
 	if shouldLog {
-		s.logf("webrtc video rtp count=%d tracks=%d pt=%d seq=%d ts=%d ssrc=%d", count, trackCount, pkt.PayloadType, pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC)
+		logger.Debugf(tag, "video rtp count=%d tracks=%d pt=%d seq=%d ts=%d ssrc=%d", count, trackCount, pkt.PayloadType, pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC)
 	}
 }
 
@@ -558,7 +574,7 @@ func (s *Service) logAudioPacket(pkt *rtp.Packet, trackCount int) {
 	}
 	s.mu.Unlock()
 	if shouldLog {
-		s.logf("webrtc audio rtp count=%d tracks=%d pt=%d seq=%d ts=%d ssrc=%d", count, trackCount, pkt.PayloadType, pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC)
+		logger.Debugf(tag, "audio rtp count=%d tracks=%d pt=%d seq=%d ts=%d ssrc=%d", count, trackCount, pkt.PayloadType, pkt.SequenceNumber, pkt.Timestamp, pkt.SSRC)
 	}
 }
 
@@ -591,7 +607,7 @@ func (s *Service) forwardBackchannel(track *webrtc.TrackRemote) {
 		pkt, _, err := track.ReadRTP()
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				s.logf("webrtc backchannel read failed: %v", err)
+				logger.Warnf(tag, "backchannel read failed err=%v", err)
 			}
 			return
 		}
@@ -600,7 +616,7 @@ func (s *Service) forwardBackchannel(track *webrtc.TrackRemote) {
 		}
 		pkt.PayloadType = s.backchannel.BackchannelOpusPayloadType()
 		if err := s.backchannel.WriteBackchannelOpus(pkt); err != nil {
-			s.logf("webrtc backchannel write failed: %v", err)
+			logger.Warnf(tag, "backchannel write failed err=%v", err)
 		}
 	}
 }
@@ -613,12 +629,6 @@ func (s *Service) prunePendingCandidatesLocked(now time.Time) {
 		if now.Sub(batch.updatedAt) > pendingCandidateTTL {
 			delete(s.pendingCandidates, sessionID)
 		}
-	}
-}
-
-func (s *Service) logf(format string, args ...any) {
-	if s.logger != nil {
-		s.logger.Printf(format, args...)
 	}
 }
 

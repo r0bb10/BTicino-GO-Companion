@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os/exec"
 	"path/filepath"
@@ -12,8 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"bticino-go-companion/internal/logger"
 	"github.com/pion/rtp"
 )
+
+const tag = "services.audiobridge"
 
 const (
 	defaultSpeexInPort   = 51060
@@ -90,28 +92,23 @@ func DefaultPorts() Ports {
 }
 
 type Service struct {
-	cfg    Config
-	logger *log.Logger
+	cfg Config
 
-	mu       sync.Mutex
-	starting bool
+	mu        sync.Mutex
+	starting  bool
 	startDone chan struct{}
-	running  bool
-	cancel   context.CancelFunc
-	procs    []*managedProcess
-	wg       sync.WaitGroup
+	running   bool
+	cancel    context.CancelFunc
+	procs     []*managedProcess
+	wg        sync.WaitGroup
 
 	speexInConn *net.UDPConn
 	opusInConn  *net.UDPConn
 }
 
-func New(cfg Config, logger *log.Logger) *Service {
-	if logger == nil {
-		logger = log.Default()
-	}
+func New(cfg Config) *Service {
 	return &Service{
-		cfg:    cfg,
-		logger: logger,
+		cfg: cfg,
 	}
 }
 
@@ -164,6 +161,8 @@ func (s *Service) Start(ctx context.Context) error {
 	s.mu.Unlock()
 
 	runCtx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	logger.Infof(tag, "starting pipelines bundle=%s ports=%+v opus_pt=%d backchannel_pt=%d", s.cfg.BundleRoot, s.cfg.Ports, s.OpusPayloadType(), s.BackchannelOpusPayloadType())
 	procs, err := s.startPipelines(runCtx)
 	s.mu.Lock()
 	s.starting = false
@@ -171,23 +170,23 @@ func (s *Service) Start(ctx context.Context) error {
 		close(done)
 	}
 	s.startDone = nil
-	if err == nil {
-		s.cancel = cancel
-		s.procs = procs
-		s.running = true
-	}
-	s.mu.Unlock()
 	if err != nil {
+		s.cancel = nil
+		s.mu.Unlock()
 		cancel()
+		logger.Errorf(tag, "start failed err=%v", err)
 		return err
 	}
+	s.procs = procs
+	s.running = true
+	s.mu.Unlock()
 
 	go func() {
 		<-ctx.Done()
 		_ = s.Stop(context.Background())
 	}()
 
-	s.logger.Printf("audio bridge started")
+	logger.Infof(tag, "started pipelines=%d", len(procs))
 	return nil
 }
 
@@ -207,6 +206,7 @@ func (s *Service) Stop(_ context.Context) error {
 	}
 	if !s.running {
 		s.mu.Unlock()
+		logger.Debugf(tag, "stop skipped reason=not_running")
 		return nil
 	}
 
@@ -223,11 +223,13 @@ func (s *Service) Stop(_ context.Context) error {
 	}
 	for _, cmd := range procs {
 		if cmd != nil && cmd.cmd != nil && cmd.cmd.Process != nil {
-			_ = cmd.cmd.Process.Kill()
+			if err := cmd.cmd.Process.Kill(); err != nil {
+				logger.Warnf(tag, "kill pipeline failed name=%s err=%v", cmd.spec.name, err)
+			}
 		}
 	}
 	s.wg.Wait()
-	s.logger.Printf("audio bridge stopped")
+	logger.Infof(tag, "stopped pipelines=%d", len(procs))
 	return nil
 }
 
@@ -237,14 +239,19 @@ func (s *Service) WriteIntercomSpeex(pkt *rtp.Packet) error {
 	}
 	raw, err := pkt.Marshal()
 	if err != nil {
+		logger.Warnf(tag, "write intercom speex marshal failed err=%v", err)
 		return err
 	}
 	conn, err := s.speexInputConnection()
 	if err != nil {
+		logger.Warnf(tag, "write intercom speex connection failed err=%v", err)
 		return err
 	}
-	_, err = conn.Write(raw)
-	return err
+	if _, err := conn.Write(raw); err != nil {
+		logger.Warnf(tag, "write intercom speex failed bytes=%d err=%v", len(raw), err)
+		return err
+	}
+	return nil
 }
 
 func (s *Service) WriteBackchannelOpus(pkt *rtp.Packet) error {
@@ -253,14 +260,19 @@ func (s *Service) WriteBackchannelOpus(pkt *rtp.Packet) error {
 	}
 	raw, err := pkt.Marshal()
 	if err != nil {
+		logger.Warnf(tag, "write backchannel opus marshal failed err=%v", err)
 		return err
 	}
 	conn, err := s.opusInputConnection()
 	if err != nil {
+		logger.Warnf(tag, "write backchannel opus connection failed err=%v", err)
 		return err
 	}
-	_, err = conn.Write(raw)
-	return err
+	if _, err := conn.Write(raw); err != nil {
+		logger.Warnf(tag, "write backchannel opus failed bytes=%d err=%v", len(raw), err)
+		return err
+	}
+	return nil
 }
 
 func (s *Service) speexInputConnection() (*net.UDPConn, error) {
@@ -275,6 +287,7 @@ func (s *Service) speexInputConnection() (*net.UDPConn, error) {
 		return nil, fmt.Errorf("dial bridge speex input: %w", err)
 	}
 	s.speexInConn = conn
+	logger.Debugf(tag, "speex input connected addr=%s", addr.String())
 	return conn, nil
 }
 
@@ -290,6 +303,7 @@ func (s *Service) opusInputConnection() (*net.UDPConn, error) {
 		return nil, fmt.Errorf("dial bridge opus input: %w", err)
 	}
 	s.opusInConn = conn
+	logger.Debugf(tag, "opus input connected addr=%s", addr.String())
 	return conn, nil
 }
 
@@ -384,11 +398,14 @@ func (s *Service) startPipelines(ctx context.Context) ([]*managedProcess, error)
 		if err := cmd.Start(); err != nil {
 			for _, started := range out {
 				if started != nil && started.cmd != nil && started.cmd.Process != nil {
-					_ = started.cmd.Process.Kill()
+					if killErr := started.cmd.Process.Kill(); killErr != nil {
+						logger.Warnf(tag, "cleanup kill failed name=%s err=%v", started.spec.name, killErr)
+					}
 				}
 			}
 			return nil, fmt.Errorf("start audio bridge pipeline %s: %w", spec.name, err)
 		}
+		logger.Debugf(tag, "pipeline started name=%s pid=%d", spec.name, cmd.Process.Pid)
 		out = append(out, &managedProcess{spec: spec, cmd: cmd})
 	}
 	for _, proc := range out {
@@ -404,26 +421,29 @@ func (s *Service) startPipelines(ctx context.Context) ([]*managedProcess, error)
 func (s *Service) supervisePipeline(ctx context.Context, proc *managedProcess) {
 	defer s.wg.Done()
 	if proc == nil {
+		logger.Warnf(tag, "pipeline supervisor stopped reason=nil_process")
 		return
 	}
 	restarts := 0
 	for {
 		cmd := proc.cmd
 		if cmd == nil {
+			logger.Warnf(tag, "pipeline supervisor stopped name=%s reason=nil_command", proc.spec.name)
 			return
 		}
 		err := cmd.Wait()
 		if ctx.Err() != nil {
+			logger.Debugf(tag, "pipeline supervisor stopped name=%s reason=context", proc.spec.name)
 			return
 		}
 		restarts++
 		if err != nil {
-			s.logger.Printf("audio bridge pipeline exited name=%s err=%v restart=%d/%d", proc.spec.name, err, restarts, pipelineMaxRestartAttempts)
+			logger.Warnf(tag, "pipeline exited name=%s err=%v restart=%d/%d", proc.spec.name, err, restarts, pipelineMaxRestartAttempts)
 		} else {
-			s.logger.Printf("audio bridge pipeline exited name=%s restart=%d/%d", proc.spec.name, restarts, pipelineMaxRestartAttempts)
+			logger.Infof(tag, "pipeline exited name=%s restart=%d/%d", proc.spec.name, restarts, pipelineMaxRestartAttempts)
 		}
 		if restarts > pipelineMaxRestartAttempts {
-			s.logger.Printf("audio bridge pipeline disabled after restart budget name=%s", proc.spec.name)
+			logger.Warnf(tag, "pipeline disabled after restart budget name=%s", proc.spec.name)
 			return
 		}
 		select {
@@ -439,20 +459,23 @@ func (s *Service) supervisePipeline(ctx context.Context, proc *managedProcess) {
 		next.Stdout = io.Discard
 		next.Stderr = io.Discard
 		if err := next.Start(); err != nil {
-			s.logger.Printf("audio bridge pipeline restart failed name=%s err=%v", proc.spec.name, err)
+			logger.Warnf(tag, "pipeline restart failed name=%s err=%v", proc.spec.name, err)
 			continue
 		}
 		s.mu.Lock()
 		if !s.running {
 			s.mu.Unlock()
 			if next.Process != nil {
-				_ = next.Process.Kill()
+				if err := next.Process.Kill(); err != nil {
+					logger.Warnf(tag, "kill restarted pipeline failed name=%s err=%v", proc.spec.name, err)
+				}
 			}
 			_ = next.Wait()
 			return
 		}
 		proc.cmd = next
 		s.mu.Unlock()
+		logger.Infof(tag, "pipeline restarted name=%s pid=%d restart=%d/%d", proc.spec.name, next.Process.Pid, restarts, pipelineMaxRestartAttempts)
 	}
 }
 
@@ -472,11 +495,15 @@ func bundledGSTEnv(bundleRoot string) []string {
 
 func (s *Service) closeInputsLocked() {
 	if s.speexInConn != nil {
-		_ = s.speexInConn.Close()
+		if err := s.speexInConn.Close(); err != nil {
+			logger.Warnf(tag, "close speex input failed err=%v", err)
+		}
 		s.speexInConn = nil
 	}
 	if s.opusInConn != nil {
-		_ = s.opusInConn.Close()
+		if err := s.opusInConn.Close(); err != nil {
+			logger.Warnf(tag, "close opus input failed err=%v", err)
+		}
 		s.opusInConn = nil
 	}
 }

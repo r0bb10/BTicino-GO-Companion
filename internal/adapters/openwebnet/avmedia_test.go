@@ -3,8 +3,6 @@ package openwebnet
 import (
 	"context"
 	"errors"
-	"io"
-	"log"
 	"net"
 	"strconv"
 	"sync"
@@ -82,7 +80,7 @@ func newTestAVClient(t *testing.T, s *fakeAVServer, highRes bool) *AVMediaClient
 	cfg.MediaAVEndpointHost = host
 	cfg.MediaAVEndpointPort = port
 	cfg.MediaAVHighResVideo = highRes
-	c := NewAVMediaClient(cfg, log.New(io.Discard, "", 0))
+	c := NewAVMediaClient(cfg)
 	c.retryDelay = 10 * time.Millisecond
 	c.audioDelay = 10 * time.Millisecond
 	c.replyTimeout = 200 * time.Millisecond

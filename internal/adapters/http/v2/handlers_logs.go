@@ -5,23 +5,24 @@ import (
 	"io"
 	"net/http"
 	"os"
+
+	"bticino-go-companion/internal/logger"
 )
 
 const maxLogResponseBytes = 512 * 1024
-
-var companionLogPath = "/tmp/companion.log"
 
 func (r *Router) handleLogs(w http.ResponseWriter, req *http.Request) {
 	if !requireMethod(w, req, http.MethodGet) {
 		return
 	}
-	b, err := readLogTail(companionLogPath, maxLogResponseBytes)
+	path := logger.LogPath()
+	b, err := readLogTail(path, maxLogResponseBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"log":     "",
 				"missing": true,
-				"path":    companionLogPath,
+				"path":    path,
 			})
 			return
 		}
@@ -30,7 +31,7 @@ func (r *Router) handleLogs(w http.ResponseWriter, req *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"log":        string(b),
-		"path":       companionLogPath,
+		"path":       path,
 		"tail_bytes": maxLogResponseBytes,
 	})
 }

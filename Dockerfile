@@ -5,8 +5,8 @@ COPY . .
 
 ENV PATH="/usr/local/go/bin:${PATH}"
 
-ARG COMPANION_VERSION=0.1.0-dev
-ARG COMPANION_GIT_SHA=dev
+ARG COMPANION_VERSION=v0.1.0-dev
+ARG COMPANION_GIT_SHA=-
 ARG COMPANION_BUILD_DATE=unknown
 
 RUN gofmt -w $(find . -name '*.go')

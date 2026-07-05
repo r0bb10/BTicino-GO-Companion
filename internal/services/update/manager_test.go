@@ -2,7 +2,6 @@ package update
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -10,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,7 +39,7 @@ func TestApplyAndRollbackLifecycle(t *testing.T) {
 		t.Fatalf("write candidate tar: %v", err)
 	}
 
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 	m.SetRestartForTest(func() error { return nil })
 	applyStatus, err := m.Apply(&Artifact{Version: "1.1.0", Path: candidatePath})
 	if err != nil {
@@ -112,7 +110,7 @@ func TestCheckFromGitHubRelease(t *testing.T) {
 
 	cfg.UpdateReleaseAPI = apiServer.URL
 
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 	status, err := m.Check(nil)
 	if err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -154,7 +152,7 @@ func TestApplyRemoteArtifactURL(t *testing.T) {
 	}))
 	defer artifactServer.Close()
 
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 	m.SetRestartForTest(func() error { return nil })
 	applyStatus, err := m.Apply(&Artifact{
 		Version: "v0.0.2",
@@ -172,7 +170,7 @@ func TestApplyRemoteArtifactURL(t *testing.T) {
 func TestCheckOverrideMissingArtifact(t *testing.T) {
 	cfg := config.Default()
 	cfg.Version = "v1.0.0"
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 
 	_, err := m.Check(&Artifact{Version: "v1.1.0"})
 	if !errors.Is(err, ErrMissingArtifact) {
@@ -182,7 +180,7 @@ func TestCheckOverrideMissingArtifact(t *testing.T) {
 
 func TestApplyWithoutAvailableUpdate(t *testing.T) {
 	cfg := config.Default()
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 
 	_, err := m.Apply(nil)
 	if !errors.Is(err, ErrNoAvailableUpdate) {
@@ -193,7 +191,7 @@ func TestApplyWithoutAvailableUpdate(t *testing.T) {
 func TestRollbackWithoutPreviousBinary(t *testing.T) {
 	cfg := config.Default()
 	cfg.DataDir = filepath.Join(t.TempDir(), "companion")
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 
 	_, err := m.Rollback()
 	if !errors.Is(err, ErrNoPreviousBinary) {
@@ -205,7 +203,7 @@ func TestHealthWindowCheck(t *testing.T) {
 	cfg := config.Default()
 	cfg.UpdateHealthTimeoutSec = 1
 	called := false
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), func(ctx context.Context) error {
+	m := NewManager(cfg, func(ctx context.Context) error {
 		called = true
 		deadline, ok := ctx.Deadline()
 		if !ok {
@@ -307,7 +305,7 @@ func TestHTTPStatusError(t *testing.T) {
 func TestStatusReturnsCopy(t *testing.T) {
 	cfg := config.Default()
 	cfg.Version = "v1.0.0"
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 
 	candidatePath := filepath.Join(t.TempDir(), "candidate.bin")
 	if err := os.WriteFile(candidatePath, []byte("candidate"), 0o755); err != nil {
@@ -331,7 +329,7 @@ func TestStatusReturnsCopy(t *testing.T) {
 
 func TestDoGETSetsHeaders(t *testing.T) {
 	cfg := config.Default()
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("User-Agent"); got != updateUserAgent {
@@ -358,7 +356,7 @@ func TestDoGETSetsHeaders(t *testing.T) {
 func TestReadManifestVariants(t *testing.T) {
 	cfg := config.Default()
 	cfg.UpdateManifestPath = filepath.Join(t.TempDir(), "manifest.json")
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 
 	if err := os.WriteFile(cfg.UpdateManifestPath, []byte(`{"available_version":"v1.2.0","artifact_path":"/tmp/bin","sha256":"ABC"}`), 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
@@ -403,7 +401,7 @@ func TestReadGitHubReleaseMissingAsset(t *testing.T) {
 	defer apiServer.Close()
 
 	cfg.UpdateReleaseAPI = apiServer.URL
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 	if _, _, err := m.readGitHubRelease(); err == nil {
 		t.Fatal("expected missing release asset error")
 	}
@@ -425,7 +423,7 @@ func TestReadGitHubReleaseMissingDigest(t *testing.T) {
 	defer apiServer.Close()
 
 	cfg.UpdateReleaseAPI = apiServer.URL
-	m := NewManager(cfg, log.New(&bytes.Buffer{}, "", 0), nil)
+	m := NewManager(cfg, nil)
 	if _, _, err := m.readGitHubRelease(); err == nil {
 		t.Fatal("expected missing digest error")
 	}

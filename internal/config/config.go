@@ -13,8 +13,8 @@ import (
 const SchemaVersion = 2
 
 var (
-	BuildVersion     = "0.1.0-dev"
-	BuildGitSHA      = "dev"
+	BuildVersion     = "v0.1.0-dev"
+	BuildGitSHA      = "-"
 	BuildDate        = "unknown"
 	BuildReleaseRepo = ""
 )

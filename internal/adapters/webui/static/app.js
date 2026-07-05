@@ -67,7 +67,8 @@ function buildNav() {
     {
       label: 'Logger',
       children: [
-        { id: 'logs', label: 'Logs' }
+        { id: 'logs', label: 'Logs' },
+        { id: 'busframes', label: 'BUS Frames' }
       ]
     },
     { id: 'about', label: 'About' }
@@ -226,7 +227,7 @@ function renderAbout() {
 function renderAboutData(session) {
   if (!session) return;
   document.getElementById('aboutVersion').textContent = session.version || '-';
-  document.getElementById('aboutGitSHA').textContent = session.git_sha ? session.git_sha.substring(0, 10) + '…' : '-';
+  document.getElementById('aboutGitSHA').textContent = session.git_sha && session.git_sha !== '-' ? session.git_sha.substring(0, 10) + '…' : '-';
 }
 
 function renderStatusData(status) {
@@ -264,25 +265,29 @@ function renderStatusData(status) {
   haBadge.className = 'badge ' + (status.ha_paired ? 'badge-success' : 'badge-info');
 }
 
-/* ──── Log page state ──── */
+/* ──── Log / Frame page state ──── */
 var _logPaused = false;
+var _framePaused = false;
 var _logTimer = null;
+var _frameTimer = null;
 var _logPrevContent = '';
 
 function startPolling(page) {
   stopPolling();
   if (page === 'logs') { fetchLogs(); _logTimer = setInterval(fetchLogs, 3000); }
+  if (page === 'busframes') { fetchFrames(); _frameTimer = setInterval(fetchFrames, 2000); }
 }
 
 function stopPolling() {
   if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
+  if (_frameTimer) { clearInterval(_frameTimer); _frameTimer = null; }
 }
 
 /* Patch switchPage to manage polling */
 var _origSwitch = switchPage;
 switchPage = function(pageId) {
   _origSwitch(pageId);
-  if (pageId === 'logs') {
+  if (pageId === 'logs' || pageId === 'busframes') {
     startPolling(pageId);
   } else {
     stopPolling();
@@ -329,6 +334,52 @@ document.getElementById('logLevelFilter').addEventListener('change', function() 
   _logPrevContent = '';
   fetchLogs();
 });
+
+/* ──── BUS Frame viewer ──── */
+function fetchFrames() {
+  if (_framePaused) return;
+  apiGet('/api/frames').then(renderFrames).catch(function() {});
+}
+
+function renderFrames(data) {
+  if (!data || !data.frames) return;
+  var container = document.getElementById('framesOutput');
+  var frames = data.frames;
+  if (frames.length === 0) {
+    container.innerHTML = '<div class="frame-entry"><span class="frame-raw" style="color:#888">No frames captured yet.</span></div>';
+    document.getElementById('frameCount').textContent = '0 frames';
+    return;
+  }
+  var html = '';
+  for (var i = 0; i < frames.length; i++) {
+    var f = frames[i];
+    var t = '';
+    if (f.t) {
+      var d = new Date(f.t);
+      t = pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+    }
+    var sys = f.sys || '?';
+    var raw = f.raw || '';
+    var mapped = f.mapped ? ' [' + f.events + ' evt]' : '';
+    html += '<div class="frame-entry">'
+      + '<span class="frame-time">' + t + '</span>'
+      + '<span class="frame-system">' + escapeHtml(sys) + '</span>'
+      + '<span class="frame-raw">' + escapeHtml(raw) + '</span>'
+      + (mapped ? '<span class="frame-mapped">' + mapped + '</span>' : '')
+      + '</div>';
+  }
+  container.innerHTML = html;
+  container.scrollTop = container.scrollHeight;
+  document.getElementById('frameCount').textContent = frames.length + ' frames';
+}
+
+function pad2(n) { return n < 10 ? '0' + n : String(n); }
+
+function toggleFramePause() {
+  _framePaused = !_framePaused;
+  document.getElementById('framePauseBtn').textContent = _framePaused ? 'Resume' : 'Pause';
+  if (!_framePaused) fetchFrames();
+}
 
 /* ──── Init ──── */
 document.getElementById('loginForm').addEventListener('submit', submitLogin);

@@ -3,8 +3,6 @@ package sipadapter
 import (
 	"context"
 	"errors"
-	"io"
-	"log"
 	"testing"
 	"time"
 
@@ -20,7 +18,7 @@ func TestManagerDisabledLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.MediaSIPEnabled = false
 
-	m := NewManager(cfg, log.New(io.Discard, "", 0))
+	m := NewManager(cfg)
 	if err := m.Start(context.Background()); err != nil {
 		t.Fatalf("disabled start should be no-op: %v", err)
 	}
@@ -32,7 +30,7 @@ func TestManagerDisabledLifecycle(t *testing.T) {
 func TestManagerDisabledHangupReturnsNoActiveCall(t *testing.T) {
 	cfg := config.Default()
 	cfg.MediaSIPEnabled = false
-	m := NewManager(cfg, log.New(io.Discard, "", 0))
+	m := NewManager(cfg)
 
 	if err := m.Hangup(context.Background()); err != ErrNoActiveCall {
 		t.Fatalf("expected ErrNoActiveCall, got %v", err)
@@ -42,7 +40,7 @@ func TestManagerDisabledHangupReturnsNoActiveCall(t *testing.T) {
 func TestManagerDisabledAnswerReturnsNoIncomingCall(t *testing.T) {
 	cfg := config.Default()
 	cfg.MediaSIPEnabled = false
-	m := NewManager(cfg, log.New(io.Discard, "", 0))
+	m := NewManager(cfg)
 
 	if err := m.Answer(context.Background()); err != ErrNoIncomingCall {
 		t.Fatalf("expected ErrNoIncomingCall, got %v", err)

@@ -3,14 +3,17 @@ package media
 import (
 	"context"
 	"errors"
-	"log"
 	"sync"
 	"time"
+
+	"bticino-go-companion/internal/logger"
 )
 
 var (
 	ErrEntrypointSwitchBlocked = errors.New("cannot switch entrypoint while stream is active")
 )
+
+const tag = "services.media"
 
 type Backend interface {
 	StreamStart(ctx context.Context, devAddr string) error
@@ -42,7 +45,6 @@ type TransitionSink func(Transition)
 
 type Service struct {
 	backend Backend
-	logger  *log.Logger
 
 	mu               sync.RWMutex
 	streamActive     bool
@@ -60,12 +62,6 @@ func NewService(backend Backend) *Service {
 	}
 }
 
-func (s *Service) SetLogger(logger *log.Logger) {
-	s.mu.Lock()
-	s.logger = logger
-	s.mu.Unlock()
-}
-
 func (s *Service) SetTransitionSink(sink TransitionSink) {
 	s.mu.Lock()
 	s.transitionSink = sink
@@ -74,16 +70,16 @@ func (s *Service) SetTransitionSink(sink TransitionSink) {
 
 func (s *Service) StartForEntrypoint(ctx context.Context, entrypointID string, devAddr string) error {
 	s.mu.Lock()
-	s.logfLocked("media start request source=api entrypoint=%s devaddr=%s active=%v active_entrypoint=%s readers=%d manual_hold=%v", entrypointID, devAddr, s.streamActive, s.activeEntrypoint, len(s.readers), s.manualHold)
+	logger.Debugf(tag, "start request source=api entrypoint=%s devaddr=%s active=%v active_entrypoint=%s readers=%d manual_hold=%v", entrypointID, devAddr, s.streamActive, s.activeEntrypoint, len(s.readers), s.manualHold)
 	if s.streamActive {
 		if s.activeEntrypoint == entrypointID {
 			s.manualHold = true
-			s.logfLocked("media start noop source=api entrypoint=%s reason=already_active", entrypointID)
+			logger.Debugf(tag, "start noop source=api entrypoint=%s reason=already_active", entrypointID)
 			s.mu.Unlock()
 			return nil
 		}
 		if len(s.readers) > 0 {
-			s.logfLocked("media start blocked source=api entrypoint=%s active_entrypoint=%s readers=%d", entrypointID, s.activeEntrypoint, len(s.readers))
+			logger.Infof(tag, "start blocked source=api entrypoint=%s active_entrypoint=%s readers=%d", entrypointID, s.activeEntrypoint, len(s.readers))
 			s.mu.Unlock()
 			return ErrEntrypointSwitchBlocked
 		}
@@ -97,7 +93,7 @@ func (s *Service) StartForEntrypoint(ctx context.Context, entrypointID string, d
 		s.activeDevAddr = devAddr
 		s.manualHold = true
 		s.mu.Unlock()
-		s.logf("media start complete source=api entrypoint=%s devaddr=%s backend=none", entrypointID, devAddr)
+		logger.Infof(tag, "start complete source=api entrypoint=%s devaddr=%s backend=none", entrypointID, devAddr)
 		s.emitTransition(Transition{
 			Kind:         "stream.started",
 			EntrypointID: entrypointID,
@@ -109,7 +105,7 @@ func (s *Service) StartForEntrypoint(ctx context.Context, entrypointID string, d
 	}
 
 	if err := s.backend.StreamStart(ctx, devAddr); err != nil {
-		s.logf("media start failed source=api entrypoint=%s devaddr=%s err=%v", entrypointID, devAddr, err)
+		logger.Warnf(tag, "start failed source=api entrypoint=%s devaddr=%s err=%v", entrypointID, devAddr, err)
 		return err
 	}
 
@@ -119,7 +115,7 @@ func (s *Service) StartForEntrypoint(ctx context.Context, entrypointID string, d
 	s.activeDevAddr = devAddr
 	s.manualHold = true
 	s.mu.Unlock()
-	s.logf("media start complete source=api entrypoint=%s devaddr=%s", entrypointID, devAddr)
+	logger.Infof(tag, "start complete source=api entrypoint=%s devaddr=%s", entrypointID, devAddr)
 	s.emitTransition(Transition{
 		Kind:         "stream.started",
 		EntrypointID: entrypointID,
@@ -132,7 +128,7 @@ func (s *Service) StartForEntrypoint(ctx context.Context, entrypointID string, d
 
 func (s *Service) StopForEntrypoint(ctx context.Context, _ string) error {
 	s.mu.Lock()
-	s.logfLocked("media stop request source=api active=%v active_entrypoint=%s readers=%d manual_hold=%v", s.streamActive, s.activeEntrypoint, len(s.readers), s.manualHold)
+	logger.Debugf(tag, "stop request source=api active=%v active_entrypoint=%s readers=%d manual_hold=%v", s.streamActive, s.activeEntrypoint, len(s.readers), s.manualHold)
 	s.manualHold = false
 	shouldStop := s.streamActive && len(s.readers) == 0
 	s.mu.Unlock()
@@ -147,9 +143,9 @@ func (s *Service) ReaderJoin(ctx context.Context, sessionID string, entrypointID
 	now := time.Now()
 
 	s.mu.Lock()
-	s.logfLocked("media reader join request session=%s entrypoint=%s devaddr=%s active=%v active_entrypoint=%s readers=%d", sessionID, entrypointID, devAddr, s.streamActive, s.activeEntrypoint, len(s.readers))
+	logger.Debugf(tag, "reader join request session=%s entrypoint=%s devaddr=%s active=%v active_entrypoint=%s readers=%d", sessionID, entrypointID, devAddr, s.streamActive, s.activeEntrypoint, len(s.readers))
 	if s.streamActive && s.activeEntrypoint != "" && s.activeEntrypoint != entrypointID {
-		s.logfLocked("media reader join blocked session=%s entrypoint=%s active_entrypoint=%s", sessionID, entrypointID, s.activeEntrypoint)
+		logger.Warnf(tag, "reader join blocked session=%s entrypoint=%s active_entrypoint=%s", sessionID, entrypointID, s.activeEntrypoint)
 		s.mu.Unlock()
 		return ErrEntrypointSwitchBlocked
 	}
@@ -166,7 +162,7 @@ func (s *Service) ReaderJoin(ctx context.Context, sessionID string, entrypointID
 			s.activeDevAddr = devAddr
 		}
 		s.mu.Unlock()
-		s.logf("media reader join noop session=%s entrypoint=%s reason=already_active", sessionID, entrypointID)
+		logger.Debugf(tag, "reader join noop session=%s entrypoint=%s reason=already_active", sessionID, entrypointID)
 		return nil
 	}
 	s.mu.Unlock()
@@ -176,7 +172,7 @@ func (s *Service) ReaderJoin(ctx context.Context, sessionID string, entrypointID
 			s.mu.Lock()
 			delete(s.readers, sessionID)
 			s.mu.Unlock()
-			s.logf("media reader join failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
+			logger.Warnf(tag, "reader join failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
 			return err
 		}
 	}
@@ -186,7 +182,7 @@ func (s *Service) ReaderJoin(ctx context.Context, sessionID string, entrypointID
 	s.activeEntrypoint = entrypointID
 	s.activeDevAddr = devAddr
 	s.mu.Unlock()
-	s.logf("media reader join complete session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
+	logger.Infof(tag, "reader join complete session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
 	s.emitTransition(Transition{
 		Kind:         "stream.started",
 		EntrypointID: entrypointID,
@@ -213,7 +209,7 @@ func (s *Service) ReaderLeave(ctx context.Context, sessionID string) error {
 	_, existed := s.readers[sessionID]
 	delete(s.readers, sessionID)
 	shouldStop := s.streamActive && len(s.readers) == 0 && !s.manualHold
-	s.logfLocked("media reader leave session=%s existed=%v active=%v remaining_readers=%d manual_hold=%v should_stop=%v", sessionID, existed, s.streamActive, len(s.readers), s.manualHold, shouldStop)
+	logger.Debugf(tag, "reader leave session=%s existed=%v active=%v remaining_readers=%d manual_hold=%v should_stop=%v", sessionID, existed, s.streamActive, len(s.readers), s.manualHold, shouldStop)
 	s.mu.Unlock()
 
 	if !shouldStop {
@@ -237,7 +233,7 @@ func (s *Service) stopStream(ctx context.Context, source string, reason string) 
 	s.mu.RLock()
 	if !s.streamActive {
 		s.mu.RUnlock()
-		s.logf("media stop noop source=%s reason=%s active=false", source, reason)
+		logger.Debugf(tag, "stop noop source=%s reason=%s active=false", source, reason)
 		return nil
 	}
 	entrypointID := s.activeEntrypoint
@@ -246,7 +242,7 @@ func (s *Service) stopStream(ctx context.Context, source string, reason string) 
 
 	if s.backend != nil {
 		if err := s.backend.StreamStop(ctx); err != nil {
-			s.logf("media stop failed source=%s reason=%s entrypoint=%s devaddr=%s err=%v", source, reason, entrypointID, devAddr, err)
+			logger.Warnf(tag, "stop failed source=%s reason=%s entrypoint=%s devaddr=%s err=%v", source, reason, entrypointID, devAddr, err)
 			return err
 		}
 	}
@@ -255,7 +251,7 @@ func (s *Service) stopStream(ctx context.Context, source string, reason string) 
 	s.activeEntrypoint = ""
 	s.activeDevAddr = ""
 	s.mu.Unlock()
-	s.logf("media stop complete source=%s reason=%s entrypoint=%s devaddr=%s", source, reason, entrypointID, devAddr)
+	logger.Infof(tag, "stop complete source=%s reason=%s entrypoint=%s devaddr=%s", source, reason, entrypointID, devAddr)
 	s.emitTransition(Transition{
 		Kind:         "stream.stopped",
 		EntrypointID: entrypointID,
@@ -264,21 +260,6 @@ func (s *Service) stopStream(ctx context.Context, source string, reason string) 
 		Reason:       reason,
 	})
 	return nil
-}
-
-func (s *Service) logf(format string, args ...any) {
-	s.mu.RLock()
-	logger := s.logger
-	s.mu.RUnlock()
-	if logger != nil {
-		logger.Printf(format, args...)
-	}
-}
-
-func (s *Service) logfLocked(format string, args ...any) {
-	if s.logger != nil {
-		s.logger.Printf(format, args...)
-	}
 }
 
 func (s *Service) emitTransition(transition Transition) {

@@ -3,9 +3,12 @@ package media
 import (
 	"context"
 	"errors"
-	"log"
 	"sync"
+
+	"bticino-go-companion/internal/logger"
 )
+
+const backendTag = "services.media.backend"
 
 const (
 	callStateRinging = "ringing"
@@ -29,7 +32,6 @@ type CompositeBackendOptions struct {
 	AudioPort int
 	VideoPort int
 	RequireAV bool
-	Logger    *log.Logger
 }
 
 type compositeBackend struct {
@@ -67,14 +69,14 @@ func (b *compositeBackend) StreamStart(ctx context.Context, devAddr string) erro
 	var sipErr error
 	state := b.callState()
 	if state == callStateRinging || state == callStateActive {
-		b.logf("media: call state %q; skipping SIP INVITE and adding AV stream only", state)
+		logger.Infof(backendTag, "sip invite skipped reason=call_in_progress state=%s", state)
 	} else if b.opts.SIP != nil {
 		sipErr = b.opts.SIP.StreamStart(ctx, devAddr)
 		switch {
 		case sipErr == nil:
 			sipStarted = true
 		case errors.Is(sipErr, ErrSIPCallInProgress):
-			b.logf("media: SIP reported call already in progress; adding AV stream only")
+			logger.Infof(backendTag, "sip invite skipped reason=call_in_progress")
 			sipErr = nil
 		default:
 			return sipErr
@@ -83,13 +85,13 @@ func (b *compositeBackend) StreamStart(ctx context.Context, devAddr string) erro
 
 	if avErr := b.opts.AV.StreamStart(ctx, b.opts.AudioPort, b.opts.VideoPort); avErr != nil {
 		if !b.opts.RequireAV && sipStarted {
-			b.logf("media: AV add-stream failed but is not required for this model: %v", avErr)
+			logger.Warnf(backendTag, "av add-stream failed required=false err=%v", avErr)
 			b.markSIPStarted(sipStarted)
 			return nil
 		}
 		if sipStarted && b.opts.SIP != nil {
 			if stopErr := b.opts.SIP.StreamStop(ctx); stopErr != nil {
-				b.logf("media: SIP cleanup after AV stream failure failed: %v", stopErr)
+				logger.Warnf(backendTag, "sip cleanup after av failure failed err=%v", stopErr)
 			}
 		}
 		return errors.Join(sipErr, avErr)
@@ -127,10 +129,4 @@ func (b *compositeBackend) markSIPStarted(started bool) {
 	b.mu.Lock()
 	b.sipStarted = started
 	b.mu.Unlock()
-}
-
-func (b *compositeBackend) logf(format string, args ...any) {
-	if b.opts.Logger != nil {
-		b.opts.Logger.Printf(format, args...)
-	}
 }

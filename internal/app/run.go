@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +21,7 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/event"
+	"bticino-go-companion/internal/logger"
 	"bticino-go-companion/internal/protocol/openwebnet"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/diagnostics"
@@ -40,6 +40,16 @@ import (
 	"github.com/pion/rtp"
 )
 
+const tag = "app"
+const configTag = "app.config"
+const discoveryTag = "app.discovery"
+const httpTag = "app.http"
+const mediaTag = "app.media"
+const openWebNetTag = "app.openwebnet"
+const snapshotTag = "app.snapshot"
+const webUITag = "app.webui"
+const updateTag = "app.update"
+
 const (
 	updateCheckInterval   = 3 * time.Hour
 	updateCheckStartDelay = 20 * time.Second
@@ -49,10 +59,16 @@ const (
 	streamStartSnapshotTimeout = 15 * time.Second
 )
 
-func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
-	if logger == nil {
-		logger = log.Default()
+func Run(ctx context.Context, cfgPath string) error {
+	closeLog, err := logger.InitFile(logger.DefaultLogPath, false)
+	if err != nil {
+		return fmt.Errorf("init logging: %w", err)
 	}
+	defer func() {
+		if err := closeLog(); err != nil {
+			fmt.Fprintf(os.Stderr, "close log failed: %v\n", err)
+		}
+	}()
 
 	resolvedConfigPath, err := config.ResolvePath(cfgPath)
 	if err != nil {
@@ -63,13 +79,13 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	if created {
-		logger.Printf("created default config at %s", resolvedConfigPath)
+		logger.Infof(configTag, "created default config path=%s", resolvedConfigPath)
 	}
 
 	commandClient := openwebnet.NewCommandClient(cfg)
 	if cfg.OpenWebNetEnabled {
-		if err := enrichConfigWithDiagnosticMetadataWithRetry(&cfg, commandClient, logger); err != nil {
-			logger.Printf("device diagnostics bootstrap skipped: %v", err)
+		if err := enrichConfigWithDiagnosticMetadataWithRetry(&cfg, commandClient); err != nil {
+			logger.Warnf(configTag, "device diagnostics bootstrap skipped err=%v", err)
 		}
 	}
 	cfg.MediaAVHighResVideo = config.DefaultAVHighResVideo(cfg.DeviceModel)
@@ -80,8 +96,8 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	}
 
 	go func() {
-		if err := discovery.Start(ctx, cfg, authStore.NeedsClaim, authStore.DeviceID, logger); err != nil {
-			logger.Printf("mdns service stopped: %v", err)
+		if err := discovery.Start(ctx, cfg, authStore.NeedsClaim, authStore.DeviceID); err != nil {
+			logger.Warnf(discoveryTag, "service stopped err=%v", err)
 		}
 	}()
 
@@ -95,7 +111,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	publish := func(ev event.Envelope) {
 		normalized := normalizer.Normalize(ev)
 		if err := validator.Validate(normalized); err != nil {
-			logger.Printf("event validation warning: %v type=%s source=%s", err, normalized.Type, normalized.Source)
+			logger.Warnf(tag, "event validation failed err=%v type=%s source=%s", err, normalized.Type, normalized.Source)
 			normalized = event.Envelope{
 				Type:   event.TypeEventInvalid,
 				TS:     normalized.TS,
@@ -133,6 +149,10 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		}
 	}()
 
+	frameBuf := openwebnet.NewFrameBuffer(200)
+
+	var getUpdateStatus func() webui.UpdateStatusInfo
+
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
 		Handler:      nil,
@@ -141,14 +161,27 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		IdleTimeout:  30 * time.Second,
 	}
 	webUIServer := &http.Server{
-		Addr:         cfg.WebUI.ListenAddr,
-		Handler:      webui.New(webui.Options{ConfigPath: resolvedConfigPath, AuthStore: authStore, Runtime: webui.RuntimeDeviceInfo{Model: cfg.DeviceModel, Firmware: cfg.DeviceFirmware, Hardware: cfg.DeviceHardware}, Status: runtimeStatus}).Handler(),
+		Addr: cfg.WebUI.ListenAddr,
+		Handler: webui.New(webui.Options{
+			ConfigPath:  resolvedConfigPath,
+			LogPath:     logger.LogPath(),
+			AuthStore:   authStore,
+			Runtime:     webui.RuntimeDeviceInfo{Model: cfg.DeviceModel, Firmware: cfg.DeviceFirmware, Hardware: cfg.DeviceHardware},
+			Status:      runtimeStatus,
+			FrameBuffer: frameBuf,
+			UpdateStatus: func() webui.UpdateStatusInfo {
+				if getUpdateStatus != nil {
+					return getUpdateStatus()
+				}
+				return webui.UpdateStatusInfo{Stage: "checking"}
+			},
+		}).Handler(),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  30 * time.Second,
 	}
 
-	sipManager := sipadapter.NewManager(cfg, logger)
+	sipManager := sipadapter.NewManager(cfg)
 	sipManager.SetEventSink(func(ev event.Envelope) {
 		publish(ev)
 	})
@@ -159,7 +192,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	runtimeStatus.SetSIPReady(true, "")
 	defer func() {
 		if err := sipManager.Close(); err != nil {
-			logger.Printf("sip manager close warning: %v", err)
+			logger.Warnf(tag, "sip manager close failed err=%v", err)
 		}
 	}()
 
@@ -180,9 +213,9 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			muted, err := commandClient.AudioMutedStatus(bootCtx)
 			if err != nil {
 				if errors.Is(err, openwebnet.ErrStatusUnavailable) {
-					logger.Printf("audio status bootstrap unavailable; waiting for runtime events")
+					logger.Infof(openWebNetTag, "audio status bootstrap unavailable")
 				} else {
-					logger.Printf("audio status bootstrap skipped: %v", err)
+					logger.Warnf(openWebNetTag, "audio status bootstrap skipped err=%v", err)
 				}
 				return
 			}
@@ -206,9 +239,9 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 				voicemailStatus, err := commandClient.VoicemailStatus(bootCtx)
 				if err != nil {
 					if errors.Is(err, openwebnet.ErrStatusUnavailable) {
-						logger.Printf("voicemail status bootstrap unavailable; waiting for runtime events")
+						logger.Infof(openWebNetTag, "voicemail status bootstrap unavailable")
 					} else {
-						logger.Printf("voicemail status bootstrap skipped: %v", err)
+						logger.Warnf(openWebNetTag, "voicemail status bootstrap skipped err=%v", err)
 					}
 					return
 				}
@@ -228,8 +261,8 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			}()
 		}
 	}
-	avBackend := openwebnet.NewAVMediaClient(cfg, logger)
-	logger.Printf("media: AV endpoint backend addr=%s:%d highres=%v", cfg.MediaAVEndpointHost, cfg.MediaAVEndpointPort, cfg.MediaAVHighResVideo)
+	avBackend := openwebnet.NewAVMediaClient(cfg)
+	logger.Infof(mediaTag, "av endpoint configured addr=%s:%d highres=%v", cfg.MediaAVEndpointHost, cfg.MediaAVEndpointPort, cfg.MediaAVHighResVideo)
 	mediaBackend := media.NewCompositeBackendWithOptions(media.CompositeBackendOptions{
 		SIP:       sipManager,
 		Commands:  commandClient,
@@ -238,17 +271,15 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		AudioPort: cfg.MediaRTPAudioPort,
 		VideoPort: cfg.MediaRTPVideoPort,
 		RequireAV: config.RequireAVAddStream(cfg.DeviceModel),
-		Logger:    logger,
 	})
 	mediaService := media.NewService(mediaBackend)
-	mediaService.SetLogger(logger)
 	var rtspServer *rtspadapter.Server
 	var snapshotService *snapshot.Service
 	mediaService.SetTransitionSink(func(tr media.Transition) {
 		if strings.TrimSpace(tr.Kind) == "" {
 			return
 		}
-		logger.Printf("stream transition kind=%s entrypoint=%s devaddr=%s source=%s reason=%s", strings.TrimSpace(tr.Kind), strings.TrimSpace(tr.EntrypointID), strings.TrimSpace(tr.DevAddr), strings.TrimSpace(tr.Source), strings.TrimSpace(tr.Reason))
+		logger.Infof(mediaTag, "stream transition kind=%s entrypoint=%s devaddr=%s source=%s reason=%s", strings.TrimSpace(tr.Kind), strings.TrimSpace(tr.EntrypointID), strings.TrimSpace(tr.DevAddr), strings.TrimSpace(tr.Source), strings.TrimSpace(tr.Reason))
 		payload := map[string]any{
 			"source": strings.TrimSpace(tr.Source),
 			"reason": strings.TrimSpace(tr.Reason),
@@ -263,15 +294,16 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			EntrypointID: strings.TrimSpace(tr.EntrypointID),
 			Payload:      payload,
 		})
-		handleStreamTransitionSideEffects(rtspServer, snapshotService, logger, tr)
+		handleStreamTransitionSideEffects(rtspServer, snapshotService, tr)
 	})
 
 	var webrtcSvc *webrtc.Service
 	if cfg.MediaRTSPEnabled {
-		rtspServer = rtspadapter.NewServer(cfg, logger, mediaService)
-		snapshotService = snapshot.New(cfg, mediaService, rtspServer, logger)
-		webrtcSvc, err = webrtc.New(logger, mediaService, rtspServer, cfg.Entrypoints, cfg.IceServers)
+		rtspServer = rtspadapter.NewServer(cfg, mediaService)
+		snapshotService = snapshot.New(cfg, mediaService, rtspServer)
+		webrtcSvc, err = webrtc.New(mediaService, rtspServer, cfg.Entrypoints, cfg.IceServers)
 		if err != nil {
+			logger.Errorf(mediaTag, "webrtc init failed err=%v", err)
 			return fmt.Errorf("init webrtc service: %w", err)
 		}
 		rtspServer.SetOnVideoPacketRTP(func(pkt *rtp.Packet) {
@@ -281,17 +313,24 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			webrtcSvc.WriteAudioRTP(pkt)
 		})
 		if err := rtspServer.Start(ctx); err != nil {
+			logger.Errorf(mediaTag, "rtsp server start failed err=%v", err)
 			return fmt.Errorf("start rtsp server: %w", err)
 		}
+		logger.Infof(mediaTag, "rtsp enabled address=%s", cfg.MediaRTSPAddress)
+	} else {
+		logger.Infof(mediaTag, "rtsp disabled by config")
 	}
 
 	var audioClient *openwebnet.CommandClient
 	if cfg.MuteEnabled {
 		audioClient = commandClient
+	} else {
+		logger.Infof(mediaTag, "mute control disabled by config")
 	}
 	voicemailClient := commandClient
 	if !cfg.VoicemailEnabled || strings.EqualFold(strings.TrimSpace(cfg.DeviceModel), "C100X") {
 		voicemailClient = nil
+		logger.Infof(mediaTag, "voicemail control disabled enabled=%t model=%s", cfg.VoicemailEnabled, strings.TrimSpace(cfg.DeviceModel))
 	}
 	controlService := control.New(cfg.Entrypoints, mediaService, commandClient, sipManager, audioClient, voicemailClient, func(ev event.Envelope) {
 		publish(ev)
@@ -303,11 +342,22 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 		cfg.SystemRebootEnabled,
 		cfg.SystemServices,
 	)
-	diagnosticsService := diagnostics.New(15*time.Second, logger)
+	diagnosticsService := diagnostics.New(15 * time.Second)
 	diagnosticsService.Refresh()
 	go diagnosticsService.Start(ctx)
-	updateManager := update.NewManager(cfg, logger, selfHealthCheck(cfg))
-	startUpdateCheckLoop(ctx, cfg, updateManager, logger)
+	updateManager := update.NewManager(cfg, selfHealthCheck(cfg))
+	getUpdateStatus = func() webui.UpdateStatusInfo {
+		st := updateManager.Status()
+		avail := ""
+		if st.Available != nil {
+			avail = st.Available.Version
+		}
+		return webui.UpdateStatusInfo{Stage: st.Stage, Available: avail}
+	}
+	startUpdateCheckLoop(ctx, cfg, updateManager)
+	if !cfg.SystemUpdateEnabled {
+		logger.Infof(updateTag, "update checks disabled by config")
+	}
 
 	router := v2.NewRouter(
 		cfg,
@@ -342,26 +392,35 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 				}
 			}
 			traceBroker.Publish(rec)
+			frameBuf.Push(msg, mapped)
 		})
 		runtimeStatus.SetOpenWebNetReady(true, "")
 		go func() {
 			if err := listener.Run(ctx, func(ev event.Envelope) { publish(ev) }); err != nil {
 				runtimeStatus.SetOpenWebNetReady(false, err.Error())
-				logger.Printf("openwebnet listener stopped: %v", err)
+				logger.Warnf(openWebNetTag, "listener stopped err=%v", err)
 			}
 		}()
+	} else {
+		logger.Infof(openWebNetTag, "listener disabled by config")
 	}
 
 	go func() {
 		<-ctx.Done()
+		logger.Infof(tag, "shutdown starting")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-		_ = webUIServer.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Warnf(httpTag, "api shutdown failed err=%v", err)
+		}
+		if err := webUIServer.Shutdown(shutdownCtx); err != nil {
+			logger.Warnf(webUITag, "webui shutdown failed err=%v", err)
+		}
+		logger.Infof(tag, "shutdown complete")
 	}()
 
 	go func() {
-		logger.Printf("companion web ui listening on %s tls=%v", webUIServer.Addr, cfg.WebUI.TLS.Enabled)
+		logger.Infof(webUITag, "listening addr=%s tls=%v", webUIServer.Addr, cfg.WebUI.TLS.Enabled)
 		var err error
 		if cfg.WebUI.TLS.Enabled {
 			err = webUIServer.ListenAndServeTLS(cfg.WebUI.TLS.CertFile, cfg.WebUI.TLS.KeyFile)
@@ -369,12 +428,13 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 			err = webUIServer.ListenAndServe()
 		}
 		if err != nil && err != http.ErrServerClosed {
-			logger.Printf("web ui server stopped: %v", err)
+			logger.Errorf(webUITag, "server stopped unexpectedly err=%v", err)
 		}
 	}()
 
-	logger.Printf("companion v2 api listening on %s", cfg.ListenAddr)
+	logger.Infof(httpTag, "v2 api listening addr=%s", cfg.ListenAddr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Errorf(httpTag, "server failed err=%v", err)
 		return fmt.Errorf("http server failed: %w", err)
 	}
 	return nil
@@ -498,7 +558,7 @@ func normalizedDetectedModel(model string) string {
 	return trimmed
 }
 
-func enrichConfigWithDiagnosticMetadata(cfg *config.Config, commandClient *openwebnet.CommandClient, logger *log.Logger) error {
+func enrichConfigWithDiagnosticMetadata(cfg *config.Config, commandClient *openwebnet.CommandClient) error {
 	if cfg == nil || commandClient == nil {
 		return nil
 	}
@@ -517,24 +577,20 @@ func enrichConfigWithDiagnosticMetadata(cfg *config.Config, commandClient *openw
 	setIfNonEmpty(&cfg.DeviceHardware, diagnostic.Hardware)
 	setIfNonEmpty(&cfg.DeviceKernel, diagnostic.Kernel)
 	setIfNonEmpty(&cfg.DeviceDistribution, diagnostic.Distribution)
-	if logger != nil {
-		logger.Printf("refreshed runtime diagnostics snapshot")
-	}
+	logger.Infof(configTag, "refreshed runtime diagnostics snapshot")
 	return nil
 }
 
-func enrichConfigWithDiagnosticMetadataWithRetry(cfg *config.Config, commandClient *openwebnet.CommandClient, logger *log.Logger) error {
+func enrichConfigWithDiagnosticMetadataWithRetry(cfg *config.Config, commandClient *openwebnet.CommandClient) error {
 	const (
 		maxAttempts = 5
 		retryDelay  = 2 * time.Second
 	)
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if err := enrichConfigWithDiagnosticMetadata(cfg, commandClient, logger); err != nil {
+		if err := enrichConfigWithDiagnosticMetadata(cfg, commandClient); err != nil {
 			lastErr = err
-			if logger != nil {
-				logger.Printf("device diagnostics attempt %d/%d failed: %v", attempt, maxAttempts, err)
-			}
+			logger.Warnf(configTag, "device diagnostics attempt %d/%d failed err=%v", attempt, maxAttempts, err)
 			if attempt < maxAttempts {
 				time.Sleep(retryDelay)
 			}
@@ -563,13 +619,13 @@ func setIfNonEmpty(dst *string, value string) bool {
 	return true
 }
 
-func handleStreamTransitionSideEffects(rtspServer *rtspadapter.Server, snapshotService *snapshot.Service, logger *log.Logger, tr media.Transition) {
+func handleStreamTransitionSideEffects(rtspServer *rtspadapter.Server, snapshotService *snapshot.Service, tr media.Transition) {
 	switch strings.TrimSpace(tr.Kind) {
 	case "stream.started":
 		if rtspServer != nil {
 			rtspServer.OnStreamStarted()
 		}
-		go captureSnapshotForStreamStart(snapshotService, logger, tr.EntrypointID)
+		go captureSnapshotForStreamStart(snapshotService, tr.EntrypointID)
 	case "stream.stopped":
 		if rtspServer != nil {
 			rtspServer.OnStreamStopped()
@@ -577,7 +633,7 @@ func handleStreamTransitionSideEffects(rtspServer *rtspadapter.Server, snapshotS
 	}
 }
 
-func captureSnapshotForStreamStart(snapshotService *snapshot.Service, logger *log.Logger, entrypointID string) {
+func captureSnapshotForStreamStart(snapshotService *snapshot.Service, entrypointID string) {
 	if snapshotService == nil {
 		return
 	}
@@ -593,18 +649,14 @@ func captureSnapshotForStreamStart(snapshotService *snapshot.Service, logger *lo
 			errors.Is(err, rtspadapter.ErrSnapshotMirrorBusy),
 			errors.Is(err, media.ErrEntrypointSwitchBlocked),
 			errors.Is(err, snapshot.ErrActiveEntrypointBlocked):
-			if logger != nil {
-				logger.Printf("stream-start snapshot skipped entrypoint=%s err=%v", normalizedEntrypointID, err)
-			}
+			logger.Infof(snapshotTag, "stream_start capture skipped entrypoint=%s err=%v", normalizedEntrypointID, err)
 		default:
-			if logger != nil {
-				logger.Printf("stream-start snapshot failed entrypoint=%s err=%v", normalizedEntrypointID, err)
-			}
+			logger.Warnf(snapshotTag, "stream_start capture failed entrypoint=%s err=%v", normalizedEntrypointID, err)
 		}
 	}
 }
 
-func startUpdateCheckLoop(ctx context.Context, cfg config.Config, manager *update.Manager, logger *log.Logger) {
+func startUpdateCheckLoop(ctx context.Context, cfg config.Config, manager *update.Manager) {
 	if manager == nil || !cfg.SystemUpdateEnabled {
 		return
 	}
@@ -625,27 +677,23 @@ func startUpdateCheckLoop(ctx context.Context, cfg config.Config, manager *updat
 			if err != nil {
 				retryCount++
 				nextDelay = updateRetryDelay(retryCount)
-				if logger != nil {
-					logger.Printf("update check failed (retry %d in %s): %v", retryCount, nextDelay, err)
-				}
+				logger.Warnf(updateTag, "check failed retry=%d next=%s err=%v", retryCount, nextDelay, err)
 			} else {
 				retryCount = 0
-				if logger != nil {
-					available := ""
-					if status.Available != nil {
-						available = strings.TrimSpace(status.Available.Version)
-					}
-					if available == "" {
-						available = "none"
-					}
-					logger.Printf(
-						"update check completed stage=%s current=%s available=%s next=%s",
-						status.Stage,
-						strings.TrimSpace(status.CurrentVersion),
-						available,
-						nextDelay,
-					)
+				available := ""
+				if status.Available != nil {
+					available = strings.TrimSpace(status.Available.Version)
 				}
+				if available == "" {
+					available = "none"
+				}
+				logger.Infof(updateTag,
+					"check completed stage=%s current=%s available=%s next=%s",
+					status.Stage,
+					strings.TrimSpace(status.CurrentVersion),
+					available,
+					nextDelay,
+				)
 			}
 			timer.Reset(nextDelay)
 		}

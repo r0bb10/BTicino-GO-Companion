@@ -3,6 +3,7 @@ package v2
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/domain/entrypoint"
 	"bticino-go-companion/internal/domain/event"
+	"bticino-go-companion/internal/logger"
 	"bticino-go-companion/internal/services/control"
 	"bticino-go-companion/internal/services/events"
 	"bticino-go-companion/internal/services/runtime"
@@ -156,9 +158,9 @@ func TestLogsEndpointRequiresBearerAndReturnsTail(t *testing.T) {
 	if err := os.WriteFile(logPath, []byte("first\nsecond\n"), 0o644); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
-	originalPath := companionLogPath
-	companionLogPath = logPath
-	t.Cleanup(func() { companionLogPath = originalPath })
+	originalPath := logger.LogPath()
+	logger.SetLogPath(logPath)
+	t.Cleanup(func() { logger.SetLogPath(originalPath) })
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v2/logs", nil)
 	rr := httptest.NewRecorder()
@@ -182,6 +184,56 @@ func TestLogsEndpointRequiresBearerAndReturnsTail(t *testing.T) {
 	}
 	if !strings.Contains(body.Log, "second") || body.Path != logPath {
 		t.Fatalf("unexpected logs response: %+v", body)
+	}
+}
+
+func TestLoggingEndpointRequiresBearerAndUpdatesLevel(t *testing.T) {
+	r, token := newAuthedRouter(t)
+	originalLevel := logger.GetLevel()
+	originalPath := logger.LogPath()
+	logPath := filepath.Join(t.TempDir(), "companion.log")
+	logger.SetLevel(logger.INFO)
+	logger.SetLogPath(logPath)
+	t.Cleanup(func() {
+		logger.SetLevel(originalLevel)
+		logger.SetLogPath(originalPath)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/logging", nil)
+	rr := httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated logging 401, got %d", rr.Code)
+	}
+
+	req = authReq(http.MethodGet, "/api/v2/logging", token)
+	rr = httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected logging 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Level  string   `json:"level"`
+		Levels []string `json:"levels"`
+		Path   string   `json:"path"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode logging response: %v", err)
+	}
+	if body.Level != "info" || body.Path != logPath || len(body.Levels) == 0 {
+		t.Fatalf("unexpected logging response: %+v", body)
+	}
+
+	req = authReq(http.MethodPut, "/api/v2/logging", token)
+	req.Body = io.NopCloser(strings.NewReader(`{"level":"debug"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	r.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected logging update 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if logger.GetLevel() != logger.DEBUG {
+		t.Fatalf("expected debug level, got %s", logger.GetLevel().String())
 	}
 }
 

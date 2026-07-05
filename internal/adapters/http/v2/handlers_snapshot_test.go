@@ -27,7 +27,7 @@ func TestEntrypointSnapshotLatestAndUnavailableCapture(t *testing.T) {
 	authStore, token := newClaimedAuth(t)
 	projector := state.NewProjector(cfg.Entrypoints)
 	ctrl := control.New(projector.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	snapSvc := snapshot.New(cfg, nil, nil, nil)
+	snapSvc := snapshot.New(cfg, nil, nil)
 	r := NewRouter(cfg, authStore, projector, ctrl, events.New(16), newTestRuntimeStatus(), trace.New(16), nil, nil, nil, snapSvc, nil)
 
 	snapshotDir := filepath.Join(cfg.DataDir, "media", "snapshots")

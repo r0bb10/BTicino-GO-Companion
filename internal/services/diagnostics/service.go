@@ -2,12 +2,14 @@ package diagnostics
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 
+	"bticino-go-companion/internal/logger"
 	"bticino-go-companion/internal/system"
 )
+
+const tag = "services.diagnostics"
 
 const defaultRefreshInterval = 15 * time.Second
 
@@ -25,24 +27,24 @@ type detectorFunc func() (system.NetworkSnapshot, bool)
 type Service struct {
 	mu       sync.RWMutex
 	interval time.Duration
-	logger   *log.Logger
 	detect   detectorFunc
 	network  NetworkSnapshot
 }
 
-func New(interval time.Duration, logger *log.Logger) *Service {
+func New(interval time.Duration) *Service {
 	if interval <= 0 {
 		interval = defaultRefreshInterval
 	}
-	return &Service{
+	svc := &Service{
 		interval: interval,
-		logger:   logger,
 		detect:   system.DetectNetworkSnapshot,
 	}
+	logger.Debugf(tag, "service created interval=%s", interval)
+	return svc
 }
 
-func NewForTest(interval time.Duration, logger *log.Logger, detect detectorFunc) *Service {
-	svc := New(interval, logger)
+func NewForTest(interval time.Duration, detect detectorFunc) *Service {
+	svc := New(interval)
 	if detect != nil {
 		svc.detect = detect
 	}
@@ -53,6 +55,8 @@ func (s *Service) Start(ctx context.Context) {
 	if s == nil {
 		return
 	}
+	logger.Debugf(tag, "refresh loop started interval=%s", s.interval)
+	defer logger.Debugf(tag, "refresh loop stopped")
 	s.Refresh()
 
 	ticker := time.NewTicker(s.interval)
@@ -79,8 +83,8 @@ func (s *Service) Refresh() {
 		wasStale := s.network.Stale
 		s.network.Stale = true
 		s.mu.Unlock()
-		if s.logger != nil && !wasStale {
-			s.logger.Printf("diagnostics refresh failed; keeping last known network snapshot")
+		if !wasStale {
+			logger.Warnf(tag, "refresh failed stale=true")
 		}
 		return
 	}
@@ -100,10 +104,16 @@ func (s *Service) Refresh() {
 
 	s.mu.Lock()
 	wasStale := s.network.Stale
+	previous := s.network
 	s.network = next
 	s.mu.Unlock()
-	if s.logger != nil && wasStale {
-		s.logger.Printf("diagnostics refresh recovered")
+	if wasStale {
+		logger.Infof(tag, "refresh recovered ip=%s mac=%s", next.IP, next.MAC)
+	}
+	if previous.IP != "" && (previous.IP != next.IP || previous.MAC != next.MAC) {
+		logger.Infof(tag, "network changed ip=%s->%s mac=%s->%s", previous.IP, next.IP, previous.MAC, next.MAC)
+	} else {
+		logger.Debugf(tag, "refresh complete ip=%s mac=%s stale=%t", next.IP, next.MAC, next.Stale)
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -193,7 +192,7 @@ func TestUpdateHandlersLifecycle(t *testing.T) {
 		t.Fatalf("write candidate: %v", err)
 	}
 
-	updateMgr := update.NewManager(cfg, log.New(io.Discard, "", 0), nil)
+	updateMgr := update.NewManager(cfg, nil)
 	updateMgr.SetRestartForTest(func() error { return nil })
 	r, token := newAuthedRouterWithDeps(t, cfg, nil, updateMgr)
 

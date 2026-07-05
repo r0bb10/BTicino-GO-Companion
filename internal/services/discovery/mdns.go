@@ -3,16 +3,18 @@ package discovery
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"strconv"
 	"strings"
 	"time"
 
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/logger"
 	"bticino-go-companion/internal/system"
 	"github.com/grandcat/zeroconf"
 )
+
+const tag = "services.discovery"
 
 const (
 	defaultMDNSServiceType = "_bticomp._tcp"
@@ -33,16 +35,9 @@ func Start(
 	cfg config.Config,
 	needsClaimFn func() bool,
 	deviceIDFn func() string,
-	logger *log.Logger,
 ) error {
-	logf := func(format string, args ...any) {
-		if logger != nil {
-			logger.Printf(format, args...)
-		}
-	}
-
 	if !cfg.MDNSEnabled {
-		logf("mdns disabled by config")
+		logger.Infof(tag, "disabled by config")
 		return nil
 	}
 
@@ -67,7 +62,7 @@ func Start(
 			latest := snapshot(baseName, needsClaimFn, deviceIDFn)
 			nextServer, err := register(service, port, cfg, latest)
 			if err != nil {
-				logf("mdns register failed service=%s port=%d err=%v", service, port, err)
+				logger.Warnf(tag, "register failed service=%s port=%d backoff=%s err=%v", service, port, backoff, err)
 				select {
 				case <-ctx.Done():
 					return nil
@@ -85,7 +80,7 @@ func Start(
 			server = nextServer
 			current = latest
 			backoff = time.Second
-			logf("mdns registered service=%s port=%d needs_claim=%t instance=%s", service, port, current.needsClaim, current.instanceName)
+			logger.Infof(tag, "registered service=%s port=%d needs_claim=%t instance=%s", service, port, current.needsClaim, current.instanceName)
 		}
 
 		select {
@@ -93,6 +88,7 @@ func Start(
 			if server != nil {
 				server.Shutdown()
 			}
+			logger.Infof(tag, "stopped")
 			return nil
 		case <-ticker.C:
 			latest := snapshot(baseName, needsClaimFn, deviceIDFn)
@@ -103,7 +99,7 @@ func Start(
 				server.Shutdown()
 				server = nil
 			}
-			logf("mdns state change detected needs_claim=%t instance=%s", latest.needsClaim, latest.instanceName)
+			logger.Infof(tag, "state change detected needs_claim=%t->%t instance=%s->%s", current.needsClaim, latest.needsClaim, current.instanceName, latest.instanceName)
 		}
 	}
 }
@@ -113,6 +109,7 @@ func register(service string, port int, cfg config.Config, state advertisementSt
 	if err != nil {
 		return nil, fmt.Errorf("select mdns interface: %w", err)
 	}
+	logger.Debugf(tag, "registering interface=%s service=%s instance=%s port=%d", iface.Name, service, state.instanceName, port)
 	return zeroconf.Register(state.instanceName, service, "local.", port, txtRecords(cfg, state), []net.Interface{iface})
 }
 

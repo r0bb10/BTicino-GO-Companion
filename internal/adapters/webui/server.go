@@ -15,8 +15,10 @@ import (
 	"sync"
 	"time"
 
+	"bticino-go-companion/internal/adapters/openwebnet"
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
+	"bticino-go-companion/internal/logger"
 	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/system"
 
@@ -26,8 +28,8 @@ import (
 const (
 	defaultUsername = "companion"
 	defaultPassword = "companion"
+	loggingTag      = "adapters.webui.logging"
 	sessionCookie   = "companion_web_session"
-	defaultLogPath  = "/tmp/companion.log"
 	maxConfigBytes  = 512 * 1024
 	maxLogBytes     = 512 * 1024
 )
@@ -43,6 +45,7 @@ type Options struct {
 	AuthStore     *auth.Store
 	Runtime       RuntimeDeviceInfo
 	Status        *runtime.Status
+	FrameBuffer   *openwebnet.FrameBuffer
 	UpdateStatus  func() UpdateStatusInfo
 }
 
@@ -58,6 +61,7 @@ type Server struct {
 	authStore     *auth.Store
 	runtime       RuntimeDeviceInfo
 	status        *runtime.Status
+	frameBuffer   *openwebnet.FrameBuffer
 	updateStatus  func() UpdateStatusInfo
 
 	mu       sync.Mutex
@@ -73,7 +77,7 @@ type session struct {
 func New(opts Options) *Server {
 	logPath := strings.TrimSpace(opts.LogPath)
 	if logPath == "" {
-		logPath = defaultLogPath
+		logPath = logger.DefaultLogPath
 	}
 	return &Server{
 		configPath: strings.TrimSpace(opts.ConfigPath),
@@ -85,6 +89,7 @@ func New(opts Options) *Server {
 			Firmware: strings.TrimSpace(opts.Runtime.Firmware),
 			Hardware: strings.TrimSpace(opts.Runtime.Hardware),
 		},
+		frameBuffer:  opts.FrameBuffer,
 		updateStatus: opts.UpdateStatus,
 		sessions:     make(map[string]session),
 	}
@@ -99,6 +104,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/status", s.requireReady(s.handleStatus))
 	mux.HandleFunc("/api/config", s.requireReady(s.handleConfig))
 	mux.HandleFunc("/api/logs", s.requireReady(s.handleLogs))
+	mux.HandleFunc("/api/logging", s.requireReady(s.handleLogging))
+	mux.HandleFunc("/api/frames", s.requireReady(s.handleFrames))
 	mux.Handle("/", s.staticHandler())
 	return mux
 }
@@ -333,6 +340,51 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"log": string(b), "path": s.logPath})
+}
+
+func (s *Server) handleLogging(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.writeLoggingState(w)
+	case http.MethodPut:
+		var req struct {
+			Level string `json:"level"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		level, err := logger.ParseLevel(req.Level)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid log level", "levels": logger.Levels()})
+			return
+		}
+		logger.SetLevel(level)
+		logger.Infof(loggingTag, "log level changed level=%s", level.String())
+		s.writeLoggingState(w)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleFrames(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.frameBuffer == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"frames": []any{}, "active": false})
+		return
+	}
+	frames := s.frameBuffer.Snapshot()
+	writeJSON(w, http.StatusOK, map[string]any{"frames": frames, "active": true})
+}
+
+func (s *Server) writeLoggingState(w http.ResponseWriter) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"level":  logger.GetLevel().String(),
+		"levels": logger.Levels(),
+		"path":   s.logPath,
+	})
 }
 
 func (s *Server) requireReady(next http.HandlerFunc) http.HandlerFunc {

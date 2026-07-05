@@ -84,6 +84,8 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v2/state", r.withBearer(r.handleState))
 	mux.HandleFunc("GET /api/v2/events", r.withBearer(r.handleEventsSSE))
 	mux.HandleFunc("GET /api/v2/logs", r.withBearer(r.handleLogs))
+	mux.HandleFunc("GET /api/v2/logging", r.withBearer(r.handleLogging))
+	mux.HandleFunc("PUT /api/v2/logging", r.withBearer(r.handleLogging))
 	mux.HandleFunc("GET /api/v2/trace/openwebnet", r.withBearer(r.handleOpenWebNetTrace))
 	mux.HandleFunc("GET /api/v2/trace/openwebnet/stream", r.withBearer(r.handleOpenWebNetTraceStream))
 	mux.HandleFunc("GET /api/v2/voicemail/messages", r.withBearer(r.handleVoicemailMessages))

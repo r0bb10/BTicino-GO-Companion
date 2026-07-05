@@ -2,8 +2,6 @@ package diagnostics
 
 import (
 	"context"
-	"io"
-	"log"
 	"testing"
 	"time"
 
@@ -12,7 +10,7 @@ import (
 
 func TestRefreshSuccess(t *testing.T) {
 	expected := 67
-	svc := NewForTest(time.Second, log.New(io.Discard, "", 0), func() (system.NetworkSnapshot, bool) {
+	svc := NewForTest(time.Second, func() (system.NetworkSnapshot, bool) {
 		return system.NetworkSnapshot{
 			IP:       "192.0.2.10",
 			Netmask:  "255.255.255.0",
@@ -47,7 +45,7 @@ func TestRefreshSuccess(t *testing.T) {
 func TestRefreshFailureMarksStaleAndKeepsLastGood(t *testing.T) {
 	count := 0
 	value := 42
-	svc := NewForTest(time.Second, log.New(io.Discard, "", 0), func() (system.NetworkSnapshot, bool) {
+	svc := NewForTest(time.Second, func() (system.NetworkSnapshot, bool) {
 		count++
 		if count == 1 {
 			return system.NetworkSnapshot{
@@ -78,7 +76,7 @@ func TestRefreshFailureMarksStaleAndKeepsLastGood(t *testing.T) {
 
 func TestStartRunsRefreshLoop(t *testing.T) {
 	value := 10
-	svc := NewForTest(20*time.Millisecond, log.New(io.Discard, "", 0), func() (system.NetworkSnapshot, bool) {
+	svc := NewForTest(20*time.Millisecond, func() (system.NetworkSnapshot, bool) {
 		value++
 		next := value
 		return system.NetworkSnapshot{WiFiRSSI: &next}, true
