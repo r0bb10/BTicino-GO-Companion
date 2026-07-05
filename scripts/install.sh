@@ -161,7 +161,7 @@ resolve_bundle_sha() {
 }
 
 companion_firewall_ports() {
-	printf '%s\n' "8080 8554"
+	printf '%s\n' "8080 80 443 8554"
 }
 
 companion_firewall_udp_ports() {

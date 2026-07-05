@@ -23,7 +23,7 @@ if [ -f /etc/init.d/functions ]; then
 fi
 
 tcp_listen_ports() {
-	echo "8080 8554"
+	echo "8080 80 443 8554"
 }
 
 udp_listen_ports() {

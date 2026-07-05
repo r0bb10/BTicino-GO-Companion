@@ -55,6 +55,65 @@ func TestSaveLoadPersistsOpenWebNetCommandPassword(t *testing.T) {
 	}
 }
 
+func TestSaveOmitsEmptyWebAuth(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "config.json")
+
+	cfg := Default()
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if strings.Contains(string(raw), "web_auth") {
+		t.Fatalf("expected empty web_auth to be omitted, got: %s", string(raw))
+	}
+}
+
+func TestSaveLoadPersistsWebAuth(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "config.json")
+
+	cfg := Default()
+	cfg.WebAuth = WebAuthConfig{Enabled: true, Username: "admin", PasswordHash: "hash", SessionSecret: "secret"}
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if !loaded.WebAuth.Enabled || loaded.WebAuth.Username != "admin" || loaded.WebAuth.PasswordHash != "hash" || loaded.WebAuth.SessionSecret != "secret" {
+		t.Fatalf("unexpected web auth after load: %+v", loaded.WebAuth)
+	}
+}
+
+func TestSaveLoadPersistsWebUIConfig(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "config.json")
+
+	cfg := Default()
+	cfg.WebUI.ListenAddr = ":443"
+	cfg.WebUI.TLS.Enabled = true
+	cfg.WebUI.TLS.CertFile = "/cfg/web.crt"
+	cfg.WebUI.TLS.KeyFile = "/cfg/web.key"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if loaded.WebUI.ListenAddr != ":443" || !loaded.WebUI.TLS.Enabled || loaded.WebUI.TLS.CertFile != "/cfg/web.crt" || loaded.WebUI.TLS.KeyFile != "/cfg/web.key" {
+		t.Fatalf("unexpected web ui config after load: %+v", loaded.WebUI)
+	}
+}
+
 func TestSaveLoadPersistsDeviceModel(t *testing.T) {
 	tDir := t.TempDir()
 	path := filepath.Join(tDir, "config.json")

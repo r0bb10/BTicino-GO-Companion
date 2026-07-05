@@ -142,7 +142,7 @@ func Run(ctx context.Context, cfgPath string, logger *log.Logger) error {
 	}
 	webUIServer := &http.Server{
 		Addr:         cfg.WebUI.ListenAddr,
-		Handler:      webui.New(webui.Options{ConfigPath: resolvedConfigPath, Logger: logger, AuthStore: authStore, Runtime: webui.RuntimeDeviceInfo{Model: cfg.DeviceModel, Firmware: cfg.DeviceFirmware, Hardware: cfg.DeviceHardware}, Status: runtimeStatus}).Handler(),
+		Handler:      webui.New(webui.Options{ConfigPath: resolvedConfigPath, AuthStore: authStore, Runtime: webui.RuntimeDeviceInfo{Model: cfg.DeviceModel, Firmware: cfg.DeviceFirmware, Hardware: cfg.DeviceHardware}, Status: runtimeStatus}).Handler(),
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  30 * time.Second,
