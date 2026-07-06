@@ -102,11 +102,15 @@ func Run(ctx context.Context, cfgPath string) error {
 	}()
 
 	projector := state.NewProjector(cfg.Entrypoints)
+	bootTime := projector.Snapshot().BootTime
 	eventBroker := events.New(512)
 	traceBroker := trace.New(1024)
 	normalizer := events.NewNormalizer(cfg.Entrypoints)
 	validator := events.NewValidator()
 	runtimeStatus := runtime.New(cfg.MediaSIPEnabled, cfg.OpenWebNetEnabled)
+	diagnosticsService := diagnostics.New(15 * time.Second)
+	diagnosticsService.Refresh()
+	go diagnosticsService.Start(ctx)
 
 	publish := func(ev event.Envelope) {
 		normalized := normalizer.Normalize(ev)
@@ -168,7 +172,9 @@ func Run(ctx context.Context, cfgPath string) error {
 			AuthStore:   authStore,
 			Runtime:     webui.RuntimeDeviceInfo{Model: cfg.DeviceModel, Firmware: cfg.DeviceFirmware, Hardware: cfg.DeviceHardware},
 			Status:      runtimeStatus,
+			Diagnostics: diagnosticsService,
 			FrameBuffer: frameBuf,
+			BootTime:    bootTime,
 			UpdateStatus: func() webui.UpdateStatusInfo {
 				if getUpdateStatus != nil {
 					return getUpdateStatus()
@@ -343,9 +349,6 @@ func Run(ctx context.Context, cfgPath string) error {
 		cfg.SystemRebootEnabled,
 		cfg.SystemServices,
 	)
-	diagnosticsService := diagnostics.New(15 * time.Second)
-	diagnosticsService.Refresh()
-	go diagnosticsService.Start(ctx)
 	updateManager := update.NewManager(cfg, selfHealthCheck(cfg))
 	getUpdateStatus = func() webui.UpdateStatusInfo {
 		st := updateManager.Status()

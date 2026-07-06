@@ -10,9 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/logger"
+	"bticino-go-companion/internal/services/diagnostics"
+	"bticino-go-companion/internal/system"
 )
 
 func TestBootstrapLoginCannotAccessConfigUntilCredentialsAreSet(t *testing.T) {
@@ -169,8 +172,13 @@ func TestCredentialChangeRequiresCurrentPasswordAndInvalidatesSessions(t *testin
 func TestStatusIncludesUpdateInfo(t *testing.T) {
 	configPath, logPath := writeTestFiles(t)
 	bootstrapConfiguredAuth(t, configPath, "admin", "correct-horse")
+	wifi := 74
+	diag := diagnostics.NewForTest(time.Second, func() (system.NetworkSnapshot, bool) {
+		return system.NetworkSnapshot{WiFiRSSI: &wifi}, true
+	})
+	diag.Refresh()
 
-	srv := httptest.NewServer(New(Options{ConfigPath: configPath, LogPath: logPath}).Handler())
+	srv := httptest.NewServer(New(Options{ConfigPath: configPath, LogPath: logPath, Diagnostics: diag, BootTime: time.Now().Add(-2 * time.Hour)}).Handler())
 	t.Cleanup(srv.Close)
 
 	loginResp := doJSON(t, srv.URL+"/api/login", http.MethodPost, map[string]string{"username": "admin", "password": "correct-horse"}, nil)
@@ -195,11 +203,70 @@ func TestStatusIncludesUpdateInfo(t *testing.T) {
 	if _, has := updateStatus["available"]; !has {
 		t.Fatalf("expected update_status.available field")
 	}
+	if payload["wifi_strength"] != float64(wifi) {
+		t.Fatalf("expected wifi_strength=%d, got %#v", wifi, payload["wifi_strength"])
+	}
+	if uptime, ok := payload["uptime_seconds"].(float64); !ok || uptime < 1 {
+		t.Fatalf("expected positive uptime_seconds, got %#v", payload["uptime_seconds"])
+	}
+	if _, ok := payload["free_ram_kb"].(float64); !ok {
+		t.Fatalf("expected numeric free_ram_kb, got %#v", payload["free_ram_kb"])
+	}
 	if _, has := payload["companion_status"]; has {
 		t.Fatal("companion_status should not be present")
 	}
 	if _, has := payload["ha_healthy_proxy"]; has {
 		t.Fatal("ha_healthy_proxy should not be present")
+	}
+}
+
+func TestRestartEndpointRequiresConfiguredSessionAndUsesServiceScript(t *testing.T) {
+	configPath, logPath := writeTestFiles(t)
+	bootstrapConfiguredAuth(t, configPath, "admin", "correct-horse")
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.UpdateServiceScript = "/tmp/companion-test-service"
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	restartCh := make(chan string, 1)
+	srv := httptest.NewServer(New(Options{
+		ConfigPath: configPath,
+		LogPath:    logPath,
+		RestartFunc: func(script string) error {
+			restartCh <- script
+			return nil
+		},
+	}).Handler())
+	t.Cleanup(srv.Close)
+
+	resp := doJSON(t, srv.URL+"/api/restart", http.MethodPost, map[string]string{}, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated restart 401, got %d", resp.StatusCode)
+	}
+	_ = readBody(t, resp)
+
+	loginResp := doJSON(t, srv.URL+"/api/login", http.MethodPost, map[string]string{"username": "admin", "password": "correct-horse"}, nil)
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected login status 200, got %d", loginResp.StatusCode)
+	}
+	resp = doJSON(t, srv.URL+"/api/restart", http.MethodPost, map[string]string{}, sessionFromResponse(t, loginResp))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected restart 202, got %d body=%s", resp.StatusCode, readBody(t, resp))
+	}
+	_ = readBody(t, resp)
+
+	select {
+	case got := <-restartCh:
+		if got != cfg.UpdateServiceScript {
+			t.Fatalf("expected restart script %q, got %q", cfg.UpdateServiceScript, got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restart function was not called")
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/logger"
+	"bticino-go-companion/internal/services/diagnostics"
 	"bticino-go-companion/internal/services/runtime"
 	"bticino-go-companion/internal/system"
 
@@ -40,13 +43,16 @@ type UpdateStatusInfo struct {
 }
 
 type Options struct {
-	ConfigPath    string
-	LogPath       string
-	AuthStore     *auth.Store
-	Runtime       RuntimeDeviceInfo
-	Status        *runtime.Status
-	FrameBuffer   *openwebnet.FrameBuffer
-	UpdateStatus  func() UpdateStatusInfo
+	ConfigPath   string
+	LogPath      string
+	AuthStore    *auth.Store
+	Runtime      RuntimeDeviceInfo
+	Status       *runtime.Status
+	Diagnostics  *diagnostics.Service
+	FrameBuffer  *openwebnet.FrameBuffer
+	UpdateStatus func() UpdateStatusInfo
+	BootTime     time.Time
+	RestartFunc  func(script string) error
 }
 
 type RuntimeDeviceInfo struct {
@@ -56,13 +62,16 @@ type RuntimeDeviceInfo struct {
 }
 
 type Server struct {
-	configPath    string
-	logPath       string
-	authStore     *auth.Store
-	runtime       RuntimeDeviceInfo
-	status        *runtime.Status
-	frameBuffer   *openwebnet.FrameBuffer
-	updateStatus  func() UpdateStatusInfo
+	configPath   string
+	logPath      string
+	authStore    *auth.Store
+	runtime      RuntimeDeviceInfo
+	status       *runtime.Status
+	diagnostics  *diagnostics.Service
+	frameBuffer  *openwebnet.FrameBuffer
+	updateStatus func() UpdateStatusInfo
+	bootTime     time.Time
+	restartFunc  func(script string) error
 
 	mu       sync.Mutex
 	sessions map[string]session
@@ -79,11 +88,16 @@ func New(opts Options) *Server {
 	if logPath == "" {
 		logPath = logger.DefaultLogPath
 	}
+	bootTime := opts.BootTime
+	if bootTime.IsZero() {
+		bootTime = time.Now()
+	}
 	return &Server{
-		configPath: strings.TrimSpace(opts.ConfigPath),
-		logPath:    logPath,
-		authStore:  opts.AuthStore,
-		status:     opts.Status,
+		configPath:  strings.TrimSpace(opts.ConfigPath),
+		logPath:     logPath,
+		authStore:   opts.AuthStore,
+		status:      opts.Status,
+		diagnostics: opts.Diagnostics,
 		runtime: RuntimeDeviceInfo{
 			Model:    strings.TrimSpace(opts.Runtime.Model),
 			Firmware: strings.TrimSpace(opts.Runtime.Firmware),
@@ -91,6 +105,8 @@ func New(opts Options) *Server {
 		},
 		frameBuffer:  opts.FrameBuffer,
 		updateStatus: opts.UpdateStatus,
+		bootTime:     bootTime,
+		restartFunc:  opts.RestartFunc,
 		sessions:     make(map[string]session),
 	}
 }
@@ -106,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/logs", s.requireReady(s.handleLogs))
 	mux.HandleFunc("/api/logging", s.requireReady(s.handleLogging))
 	mux.HandleFunc("/api/frames", s.requireReady(s.handleFrames))
+	mux.HandleFunc("/api/restart", s.requireReady(s.handleRestart))
 	mux.Handle("/", s.staticHandler())
 	return mux
 }
@@ -264,15 +281,39 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.updateStatus != nil {
 		updateInfo = s.updateStatus()
 	}
+	network := diagnostics.NetworkSnapshot{}
+	if s.diagnostics != nil {
+		network = s.diagnostics.NetworkSnapshot()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"model":        model,
-		"firmware":     firmware,
-		"hardware":     hardware,
-		"version":      cfg.Version,
-		"git_sha":      cfg.GitSHA,
-		"ha_paired":    cfg.Auth.Claimed,
-		"update_status": updateInfo,
+		"model":          model,
+		"firmware":       firmware,
+		"hardware":       hardware,
+		"version":        cfg.Version,
+		"git_sha":        cfg.GitSHA,
+		"ha_paired":      cfg.Auth.Claimed,
+		"uptime_seconds": int64(time.Since(s.bootTime).Seconds()),
+		"free_ram_kb":    readMemAvailableKB(),
+		"wifi_strength":  network.WiFiStrength,
+		"update_status":  updateInfo,
 	})
+}
+
+func readMemAvailableKB() int64 {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "MemAvailable:" {
+			value, err := strconv.ParseInt(fields[1], 10, 64)
+			if err == nil {
+				return value
+			}
+		}
+	}
+	return 0
 }
 
 func hardwareVersion(cfg config.Config) string {
@@ -377,6 +418,37 @@ func (s *Server) handleFrames(w http.ResponseWriter, r *http.Request) {
 	}
 	frames := s.frameBuffer.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{"frames": frames, "active": true})
+}
+
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	cfg, err := config.Load(s.configPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load config failed")
+		return
+	}
+	script := strings.TrimSpace(cfg.UpdateServiceScript)
+	if script == "" {
+		script = "/etc/init.d/companion"
+	}
+	restart := s.restartFunc
+	if restart == nil {
+		restart = restartCompanionService
+	}
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		if err := restart(script); err != nil {
+			logger.Errorf("adapters.webui.restart", "restart failed script=%s err=%v", script, err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "restarting": true})
+}
+
+func restartCompanionService(script string) error {
+	return exec.Command(script, "restart").Start()
 }
 
 func (s *Server) writeLoggingState(w http.ResponseWriter) {

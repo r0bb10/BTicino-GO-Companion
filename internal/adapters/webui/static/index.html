@@ -87,11 +87,10 @@
           </div>
         </div>
         <div class="card">
-          <div class="card-header">Home Assistant</div>
-          <div class="info-row">
-            <span class="info-label">Paired</span>
-            <span class="info-value"><span id="statusHABadge" class="badge badge-info">-</span></span>
-          </div>
+          <div class="card-header">Status</div>
+          <div class="info-row"><span class="info-label">Uptime</span><span class="info-value" id="statusUptime">-</span></div>
+          <div class="info-row"><span class="info-label">Free RAM</span><span class="info-value" id="statusFreeRAM">-</span></div>
+          <div class="info-row"><span class="info-label">Wi-Fi</span><span class="info-value" id="statusWifi">-</span></div>
         </div>
       </div>
 
@@ -134,14 +133,112 @@
       </div>
     </div>
 
-    <!-- Config -->
-    <div id="configPage" class="page hidden">
-      <h1 class="page-title">Config</h1>
-      <p class="page-desc">Configuration settings</p>
-      <div class="card dummy-content">
-        <div class="dummy-icon">&#x1F6E0;</div>
-        <h2>Config</h2>
-        <p>Coming soon.</p>
+    <!-- Config: Home Assistant -->
+    <div id="configHaPage" class="page hidden">
+      <div class="flex-between mb-16">
+        <div>
+          <h1 class="page-title">Home Assistant</h1>
+          <p class="page-desc" style="margin-bottom:0">Pairing and local API credentials</p>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="saveHomeAssistantConfig(this)">Save</button>
+      </div>
+      <div class="card section">
+        <div class="card-header">Pairing</div>
+        <div class="info-row mb-16">
+          <span class="info-label">Status</span>
+          <span class="info-value"><span id="haConfigBadge" class="badge badge-info">-</span></span>
+        </div>
+        <form id="haConfigForm" onsubmit="return false">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Claim Code</label>
+              <div class="input-toggle-wrap">
+                <input class="form-input" name="claim_code" type="password" autocomplete="off">
+                <button type="button" class="toggle-vis" onclick="toggleVis(this)" title="Show/Hide">&#x1F441;</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">API Bearer Token</label>
+              <div class="input-toggle-wrap">
+                <input class="form-input" name="bearer_token" type="password" autocomplete="off">
+                <button type="button" class="toggle-vis" onclick="toggleVis(this)" title="Show/Hide">&#x1F441;</button>
+              </div>
+            </div>
+          </div>
+          <details class="advanced-section">
+            <summary>Advanced</summary>
+            <div class="advanced-body">
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label">Device ID</label>
+                  <input class="form-input" name="device_id" type="text" autocomplete="off" readonly>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Key ID</label>
+                  <input class="form-input" name="key_id" type="text" autocomplete="off" readonly>
+                </div>
+              </div>
+            </div>
+          </details>
+          <div id="haConfigStatus" class="form-status"></div>
+        </form>
+      </div>
+
+      <div class="card section">
+        <div class="card-header">WebRTC ICE Servers</div>
+        <p class="card-desc">Optional STUN/TURN servers used by browser WebRTC clients when direct local ICE is not enough. Leave empty for local-network use.<br>Tip: Public STUN servers are best-effort and not guaranteed. For reliable remote access, use your own TURN server.</p>
+        <div id="iceServersList"></div>
+      </div>
+    </div>
+
+    <!-- Config: Entrypoints -->
+    <div id="configEntrypointsPage" class="page hidden">
+      <div class="flex-between mb-16">
+        <div>
+          <h1 class="page-title">Entrypoints</h1>
+          <p class="page-desc" style="margin-bottom:0">Gates, addresses, and exposed capabilities</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-secondary btn-sm" onclick="addEntrypointCard()">+ Add</button>
+          <button class="btn btn-primary btn-sm" onclick="saveEntrypointsConfig(this)">Save</button>
+        </div>
+      </div>
+      <div id="entrypointsList"></div>
+      <div id="entrypointsStatus" class="form-status"></div>
+    </div>
+
+    <!-- Admin: User -->
+    <div id="adminUserPage" class="page hidden">
+      <h1 class="page-title">User</h1>
+      <p class="page-desc">Web UI login credentials</p>
+      <div class="card section">
+        <div class="card-header">Account</div>
+        <form id="adminUserForm" onsubmit="return false">
+          <div class="form-group">
+            <label class="form-label">Username</label>
+            <input class="form-input" name="username" autocomplete="username" required>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Current Password</label>
+              <div class="input-toggle-wrap">
+                <input class="form-input" name="current_password" type="password" autocomplete="current-password" required>
+                <button type="button" class="toggle-vis" onclick="toggleVis(this)" title="Show/Hide">&#x1F441;</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">New Password</label>
+              <div class="input-toggle-wrap">
+                <input class="form-input" name="password" type="password" autocomplete="new-password" minlength="8" required>
+                <button type="button" class="toggle-vis" onclick="toggleVis(this)" title="Show/Hide">&#x1F441;</button>
+              </div>
+            </div>
+          </div>
+          <div class="flex-between">
+            <span id="adminUserStatus" class="form-status"></span>
+            <button type="button" class="btn btn-primary" onclick="saveAdminUser()">Save Credentials</button>
+          </div>
+        </form>
       </div>
     </div>
 
