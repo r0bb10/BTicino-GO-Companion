@@ -1,15 +1,28 @@
 package webrtc
 
 import (
+	"context"
 	"net"
 	"strings"
 	"testing"
 	"time"
 
+	"bticino-go-companion/internal/domain/entrypoint"
+
 	"github.com/pion/webrtc/v4"
 )
 
+type lifecycleStub struct{}
+
+func (l lifecycleStub) ReaderJoin(context.Context, string, string, string) error { return nil }
+func (l lifecycleStub) ReaderLeave(context.Context, string) error                { return nil }
+
 func newServiceForTest(t *testing.T) *Service {
+	t.Helper()
+	return newServiceForTestWithStream(t, nil, nil)
+}
+
+func newServiceForTestWithStream(t *testing.T, stream StreamLifecycle, entrypoints []entrypoint.Model) *Service {
 	t.Helper()
 	origPort := webrtcICEPort
 	origPreferred := preferredOutboundInterface
@@ -21,11 +34,57 @@ func newServiceForTest(t *testing.T) *Service {
 		webrtcICEPort = origPort
 		preferredOutboundInterface = origPreferred
 	})
-	svc, err := New(nil, nil, nil, nil)
+	svc, err := New(stream, nil, entrypoints, nil)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
 	return svc
+}
+
+func TestHandleOfferAdvertisesMonoOpusFMTP(t *testing.T) {
+	svc := newServiceForTestWithStream(t, lifecycleStub{}, []entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true}})
+	offer := newBrowserLikeOffer(t)
+
+	result, err := svc.HandleOffer(context.Background(), "session-1", "main", offer)
+	if err != nil {
+		t.Fatalf("handle offer: %v", err)
+	}
+
+	if !strings.Contains(result.AnswerSDP, "a=rtpmap:111 opus/48000/2") {
+		t.Fatalf("expected browser-compatible opus rtpmap in answer SDP:\n%s", result.AnswerSDP)
+	}
+	if !strings.Contains(result.AnswerSDP, "a=fmtp:111") || !strings.Contains(result.AnswerSDP, "stereo=0") || !strings.Contains(result.AnswerSDP, "sprop-stereo=0") {
+		t.Fatalf("expected mono opus fmtp in answer SDP:\n%s", result.AnswerSDP)
+	}
+}
+
+func newBrowserLikeOffer(t *testing.T) string {
+	t.Helper()
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("new peer connection: %v", err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
+		t.Fatalf("add video transceiver: %v", err)
+	}
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
+		t.Fatalf("add audio transceiver: %v", err)
+	}
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("create offer: %v", err)
+	}
+	gatherDone := webrtc.GatheringCompletePromise(pc)
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatalf("set local description: %v", err)
+	}
+	<-gatherDone
+	local := pc.LocalDescription()
+	if local == nil || strings.TrimSpace(local.SDP) == "" {
+		t.Fatal("empty local offer")
+	}
+	return local.SDP
 }
 
 func TestAddCandidateQueuesUnknownSession(t *testing.T) {

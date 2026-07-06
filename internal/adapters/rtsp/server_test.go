@@ -175,10 +175,17 @@ func TestServerHelperFunctions(t *testing.T) {
 }
 
 func TestServerStaticStreamIncludesOpusBackchannel(t *testing.T) {
-	desc, _, _, backMed := buildStaticStreamDescription(true, 111, 112)
+	desc, _, audioMed, backMed := buildStaticStreamDescription(true, 111, 112)
 
 	if backMed == nil || len(desc.Medias) != 3 {
 		t.Fatalf("expected direct video/audio plus backchannel, got %+v", desc.Medias)
+	}
+	audioOpus, ok := audioMed.Formats[0].(*format.Opus)
+	if !ok {
+		t.Fatalf("expected Opus audio format, got %T", audioMed.Formats[0])
+	}
+	if audioOpus.PayloadTyp != 111 || audioOpus.ChannelCount != 1 {
+		t.Fatalf("unexpected downlink opus format: %+v", audioOpus)
 	}
 	if !backMed.IsBackChannel || backMed.Type != description.MediaTypeAudio {
 		t.Fatalf("unexpected backchannel media: %+v", backMed)
@@ -187,7 +194,7 @@ func TestServerStaticStreamIncludesOpusBackchannel(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected Opus backchannel format, got %T", backMed.Formats[0])
 	}
-	if opus.PayloadTyp != 112 {
+	if opus.PayloadTyp != 112 || opus.ChannelCount != 1 {
 		t.Fatalf("unexpected backchannel opus format: %+v", opus)
 	}
 
@@ -196,7 +203,10 @@ func TestServerStaticStreamIncludesOpusBackchannel(t *testing.T) {
 		t.Fatalf("marshal description failed: %v", err)
 	}
 	sdp := string(marshaled)
-	if !strings.Contains(sdp, "m=audio 0 RTP/AVP 112") || !strings.Contains(sdp, "a=sendonly") {
+	if !strings.Contains(sdp, "m=audio 0 RTP/AVP 111") || !strings.Contains(sdp, "a=fmtp:111 sprop-stereo=0") {
+		t.Fatalf("expected mono Opus downlink in SDP: %s", sdp)
+	}
+	if !strings.Contains(sdp, "m=audio 0 RTP/AVP 112") || !strings.Contains(sdp, "a=fmtp:112 sprop-stereo=0") || !strings.Contains(sdp, "a=sendonly") {
 		t.Fatalf("expected Opus backchannel in SDP: %s", sdp)
 	}
 }

@@ -24,6 +24,7 @@ const tag = "services.webrtc"
 const (
 	defaultGatherTimeout = 5 * time.Second
 	defaultAnswerTimeout = 8 * time.Second
+	webrtcOpusFMTP       = "minptime=10;useinbandfec=0;stereo=0;sprop-stereo=0"
 
 	pendingCandidateTTL         = 45 * time.Second
 	maxPendingSessionCandidates = 64
@@ -86,6 +87,7 @@ type Service struct {
 	lastVideoCountLog time.Time
 	lastAudioCountLog time.Time
 	iceServers        []string
+	opusPayloadType   uint8
 }
 
 type session struct {
@@ -127,7 +129,7 @@ func New(stream StreamLifecycle, backchannel BackchannelWriter, entrypoints []en
 			MimeType:    webrtc.MimeTypeOpus,
 			ClockRate:   48000,
 			Channels:    2,
-			SDPFmtpLine: "minptime=10;useinbandfec=0",
+			SDPFmtpLine: webrtcOpusFMTP,
 		},
 		PayloadType: webrtc.PayloadType(opusPayloadType),
 	}, webrtc.RTPCodecTypeAudio); err != nil {
@@ -171,6 +173,7 @@ func New(stream StreamLifecycle, backchannel BackchannelWriter, entrypoints []en
 		devAddrMap:        devAddrMap,
 		api:               api,
 		iceServers:        iceServers,
+		opusPayloadType:   opusPayloadType,
 	}, nil
 }
 
@@ -223,7 +226,7 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 		MimeType:    webrtc.MimeTypeOpus,
 		ClockRate:   48000,
 		Channels:    2,
-		SDPFmtpLine: "minptime=10;useinbandfec=0",
+		SDPFmtpLine: webrtcOpusFMTP,
 	}, "audio", sessionID)
 	if err != nil {
 		return OfferResult{}, fmt.Errorf("create audio track: %w", err)
@@ -316,6 +319,19 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 		_ = pc.Close()
 		logger.Warnf(tag, "add audio transceiver failed session=%s err=%v", sessionID, err)
 		return OfferResult{}, fmt.Errorf("add audio transceiver: %w", err)
+	}
+	if err := audioTransceiver.SetCodecPreferences([]webrtc.RTPCodecParameters{{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: webrtcOpusFMTP,
+		},
+		PayloadType: webrtc.PayloadType(s.opusPayloadType),
+	}}); err != nil {
+		_ = pc.Close()
+		logger.Warnf(tag, "set audio codec preferences failed session=%s err=%v", sessionID, err)
+		return OfferResult{}, fmt.Errorf("set audio codec preferences: %w", err)
 	}
 	go drainRTCP(videoTransceiver.Sender())
 	go drainRTCP(audioTransceiver.Sender())

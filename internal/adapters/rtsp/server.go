@@ -308,10 +308,12 @@ func buildStaticStreamDescription(audioBridgeEnabled bool, opusPayloadType uint8
 	var backForma format.Format
 	if audioBridgeEnabled {
 		audioForma = &format.Opus{
-			PayloadTyp: opusPayloadType,
+			PayloadTyp:   opusPayloadType,
+			ChannelCount: 1,
 		}
 		backForma = &format.Opus{
-			PayloadTyp: backchannelOpusPayloadType,
+			PayloadTyp:   backchannelOpusPayloadType,
+			ChannelCount: 1,
 		}
 	} else {
 		audioForma = &format.Speex{
