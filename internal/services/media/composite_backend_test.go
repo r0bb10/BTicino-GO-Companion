@@ -124,7 +124,6 @@ func TestCompositeBackendAVFailureAfterSIPSuccessCleansUp(t *testing.T) {
 		AV:        av,
 		AudioPort: 5000,
 		VideoPort: 5007,
-		RequireAV: true,
 	})
 
 	if err := backend.StreamStart(context.Background(), "20"); err == nil {
@@ -132,24 +131,6 @@ func TestCompositeBackendAVFailureAfterSIPSuccessCleansUp(t *testing.T) {
 	}
 	if sip.stopCalls != 1 {
 		t.Fatalf("expected SIP cleanup, got %d", sip.stopCalls)
-	}
-}
-
-func TestCompositeBackendOptionalAVFailureAfterSIPSuccessStillStarts(t *testing.T) {
-	sip := &sipStub{}
-	av := &commandStub{startErr: errors.New("av failed")}
-	backend := NewCompositeBackendWithOptions(CompositeBackendOptions{
-		SIP:       sip,
-		AV:        av,
-		AudioPort: 5000,
-		VideoPort: 5007,
-	})
-
-	if err := backend.StreamStart(context.Background(), "20"); err != nil {
-		t.Fatalf("optional AV failure after SIP success must not fail stream start: %v", err)
-	}
-	if sip.stopCalls != 0 {
-		t.Fatalf("did not expect SIP cleanup for optional AV failure, got %d", sip.stopCalls)
 	}
 }
 

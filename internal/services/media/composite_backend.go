@@ -31,7 +31,6 @@ type CompositeBackendOptions struct {
 	CallState func() string
 	AudioPort int
 	VideoPort int
-	RequireAV bool
 }
 
 type compositeBackend struct {
@@ -84,11 +83,6 @@ func (b *compositeBackend) StreamStart(ctx context.Context, devAddr string) erro
 	}
 
 	if avErr := b.opts.AV.StreamStart(ctx, b.opts.AudioPort, b.opts.VideoPort); avErr != nil {
-		if !b.opts.RequireAV && sipStarted {
-			logger.Warnf(backendTag, "av add-stream failed required=false err=%v", avErr)
-			b.markSIPStarted(sipStarted)
-			return nil
-		}
 		if sipStarted && b.opts.SIP != nil {
 			if stopErr := b.opts.SIP.StreamStop(ctx); stopErr != nil {
 				logger.Warnf(backendTag, "sip cleanup after av failure failed err=%v", stopErr)

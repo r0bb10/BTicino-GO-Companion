@@ -29,10 +29,11 @@ type AVMediaClient struct {
 	maxAttempts  int
 	audioDelay   time.Duration
 
-	videoCounter         func() uint64
-	videoConfirmTimeout  time.Duration
-	videoConfirmPoll     time.Duration
-	videoConfirmMinDelta uint64
+	videoRecentlyFlowing func(time.Duration) bool
+	audioRecentlyFlowing func(time.Duration) bool
+	flowConfirmTimeout   time.Duration
+	flowConfirmPoll      time.Duration
+	flowRecentWindow     time.Duration
 
 	mu   sync.Mutex
 	conn net.Conn
@@ -45,19 +46,25 @@ func NewAVMediaClient(cfg config.Config) *AVMediaClient {
 		highRes:      cfg.MediaAVHighResVideo,
 		dialTimeout:  5 * time.Second,
 		replyTimeout: 5 * time.Second,
-		retryDelay:   time.Second,
+		retryDelay:   300 * time.Millisecond,
 		maxAttempts:  3,
 		audioDelay:   300 * time.Millisecond,
 
-		videoConfirmTimeout:  1200 * time.Millisecond,
-		videoConfirmPoll:     100 * time.Millisecond,
-		videoConfirmMinDelta: 5,
+		flowConfirmTimeout: 1200 * time.Millisecond,
+		flowConfirmPoll:    100 * time.Millisecond,
+		flowRecentWindow:   5 * time.Second,
 	}
 }
 
-func (c *AVMediaClient) SetVideoCounter(counter func() uint64) {
+func (c *AVMediaClient) SetVideoRecentlyFlowing(fn func(time.Duration) bool) {
 	c.mu.Lock()
-	c.videoCounter = counter
+	c.videoRecentlyFlowing = fn
+	c.mu.Unlock()
+}
+
+func (c *AVMediaClient) SetAudioRecentlyFlowing(fn func(time.Duration) bool) {
+	c.mu.Lock()
+	c.audioRecentlyFlowing = fn
 	c.mu.Unlock()
 }
 
@@ -66,14 +73,17 @@ func (c *AVMediaClient) StreamStart(ctx context.Context, audioPort, videoPort in
 		logger.Warnf(tag, "stream start rejected reason=invalid_ports audio=%d video=%d", audioPort, videoPort)
 		return errors.New("invalid av stream ports")
 	}
-	baseline := c.currentVideoCount()
-	video := openwebnetproto.BuildAVAddStreamVideo(c.streamIP, videoPort, c.highRes)
-	if err := c.sendCommand(ctx, "add-video-stream", video); err != nil {
-		if c.waitForVideoFlow(ctx, baseline) {
-			logger.Warnf(tag, "add-video-stream failed but video is flowing audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
-		} else {
-			logger.Errorf(tag, "add-video-stream failed audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
-			return err
+	if c.isVideoFlowing() {
+		logger.Infof(tag, "add-video-stream skipped reason=video_already_flowing audio_port=%d video_port=%d", audioPort, videoPort)
+	} else {
+		video := openwebnetproto.BuildAVAddStreamVideo(c.streamIP, videoPort, c.highRes)
+		if err := c.sendCommand(ctx, "add-video-stream", video, c.isVideoFlowing); err != nil {
+			if c.waitForFlow(ctx, c.isVideoFlowing) {
+				logger.Warnf(tag, "add-video-stream accepted reason=video_flowing audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
+			} else {
+				logger.Errorf(tag, "add-video-stream failed audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
+				return err
+			}
 		}
 	}
 	select {
@@ -81,29 +91,51 @@ func (c *AVMediaClient) StreamStart(ctx context.Context, audioPort, videoPort in
 		return ctx.Err()
 	case <-time.After(c.audioDelay):
 	}
+	if c.isAudioFlowing() {
+		logger.Infof(tag, "add-audio-stream skipped reason=audio_already_flowing audio_port=%d video_port=%d", audioPort, videoPort)
+		logger.Infof(tag, "stream start complete audio_port=%d video_port=%d highres=%t", audioPort, videoPort, c.highRes)
+		return nil
+	}
 
 	audio := openwebnetproto.BuildAVAddStreamAudio(c.streamIP, audioPort)
-	if err := c.sendCommand(ctx, "add-audio-stream", audio); err != nil {
-		logger.Warnf(tag, "add-audio-stream failed audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
+	if err := c.sendCommand(ctx, "add-audio-stream", audio, c.isAudioFlowing); err != nil {
+		if c.waitForFlow(ctx, c.isAudioFlowing) {
+			logger.Warnf(tag, "add-audio-stream accepted reason=audio_flowing audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
+		} else {
+			logger.Errorf(tag, "add-audio-stream failed audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
+			return err
+		}
 	}
 	logger.Infof(tag, "stream start complete audio_port=%d video_port=%d highres=%t", audioPort, videoPort, c.highRes)
 	return nil
 }
 
-func (c *AVMediaClient) sendCommand(ctx context.Context, label, frame string) error {
+func (c *AVMediaClient) sendCommand(ctx context.Context, label, frame string, flowing func() bool) error {
 	var lastErr error
 	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
+		if flowing != nil && flowing() {
+			logger.Debugf(tag, "command skipped label=%s reason=flowing attempt=%d/%d", label, attempt, c.maxAttempts)
+			return nil
+		}
 		if attempt > 1 {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(c.retryDelay):
 			}
+			if flowing != nil && flowing() {
+				logger.Debugf(tag, "command retry skipped label=%s reason=flowing attempt=%d/%d", label, attempt, c.maxAttempts)
+				return nil
+			}
 		}
 		reply, err := c.exchange(frame)
 		if err != nil {
 			lastErr = err
 			logger.Debugf(tag, "command attempt failed label=%s attempt=%d/%d err=%v", label, attempt, c.maxAttempts, err)
+			if flowing != nil && flowing() {
+				logger.Debugf(tag, "command accepted label=%s reason=flowing_after_error attempt=%d/%d", label, attempt, c.maxAttempts)
+				return nil
+			}
 			continue
 		}
 		logger.Debugf(tag, "command reply label=%s attempt=%d/%d frame=%q reply=%q", label, attempt, c.maxAttempts, frame, reply)
@@ -113,6 +145,10 @@ func (c *AVMediaClient) sendCommand(ctx context.Context, label, frame string) er
 		if reply == openwebnetproto.FrameNACK {
 			lastErr = fmt.Errorf("%w: NAK", ErrAVCommandRejected)
 			logger.Debugf(tag, "command rejected label=%s attempt=%d/%d reply=NAK", label, attempt, c.maxAttempts)
+			if flowing != nil && flowing() {
+				logger.Debugf(tag, "command accepted label=%s reason=flowing_after_nak attempt=%d/%d", label, attempt, c.maxAttempts)
+				return nil
+			}
 			continue
 		}
 		c.closeConn()
@@ -176,26 +212,39 @@ func isAllACKs(reply string) bool {
 	return true
 }
 
-func (c *AVMediaClient) currentVideoCount() uint64 {
+func (c *AVMediaClient) isVideoFlowing() bool {
 	c.mu.Lock()
-	counter := c.videoCounter
+	fn := c.videoRecentlyFlowing
+	window := c.flowRecentWindow
 	c.mu.Unlock()
-	if counter == nil {
-		return 0
+	if fn == nil {
+		return false
 	}
-	return counter()
+	return fn(window)
 }
 
-func (c *AVMediaClient) waitForVideoFlow(ctx context.Context, baseline uint64) bool {
+func (c *AVMediaClient) isAudioFlowing() bool {
 	c.mu.Lock()
-	counter := c.videoCounter
-	timeout := c.videoConfirmTimeout
-	poll := c.videoConfirmPoll
-	minDelta := c.videoConfirmMinDelta
+	fn := c.audioRecentlyFlowing
+	window := c.flowRecentWindow
+	c.mu.Unlock()
+	if fn == nil {
+		return false
+	}
+	return fn(window)
+}
+
+func (c *AVMediaClient) waitForFlow(ctx context.Context, flowing func() bool) bool {
+	c.mu.Lock()
+	timeout := c.flowConfirmTimeout
+	poll := c.flowConfirmPoll
 	c.mu.Unlock()
 
-	if counter == nil {
+	if flowing == nil {
 		return false
+	}
+	if flowing() {
+		return true
 	}
 
 	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -204,7 +253,7 @@ func (c *AVMediaClient) waitForVideoFlow(ctx context.Context, baseline uint64) b
 	defer ticker.Stop()
 
 	for {
-		if counter() >= baseline+minDelta {
+		if flowing() {
 			return true
 		}
 		select {

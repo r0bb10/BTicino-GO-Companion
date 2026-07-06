@@ -87,6 +87,8 @@ type Server struct {
 
 	videoIngestCount uint64
 	audioIngestCount uint64
+	lastVideoIngest  time.Time
+	lastAudioIngest  time.Time
 }
 
 func NewServer(cfg config.Config, lifecycle Lifecycle) *Server {
@@ -947,12 +949,15 @@ func sortedRoutePaths(routes map[string]entrypoint.StreamRoute) []string {
 func (s *Server) incrementIngestCount(mediaType description.MediaType) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now()
 	if mediaType == description.MediaTypeVideo {
 		s.videoIngestCount++
+		s.lastVideoIngest = now
 		return
 	}
 	if mediaType == description.MediaTypeAudio {
 		s.audioIngestCount++
+		s.lastAudioIngest = now
 	}
 }
 
@@ -960,4 +965,34 @@ func (s *Server) VideoIngestCount() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.videoIngestCount
+}
+
+func (s *Server) AudioIngestCount() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.audioIngestCount
+}
+
+func (s *Server) VideoRecentlyFlowing(window time.Duration) bool {
+	s.mu.RLock()
+	last := s.lastVideoIngest
+	s.mu.RUnlock()
+	return recentlyFlowing(last, window)
+}
+
+func (s *Server) AudioRecentlyFlowing(window time.Duration) bool {
+	s.mu.RLock()
+	last := s.lastAudioIngest
+	s.mu.RUnlock()
+	return recentlyFlowing(last, window)
+}
+
+func recentlyFlowing(last time.Time, window time.Duration) bool {
+	if last.IsZero() {
+		return false
+	}
+	if window <= 0 {
+		return true
+	}
+	return time.Since(last) <= window
 }

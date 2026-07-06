@@ -276,7 +276,6 @@ func Run(ctx context.Context, cfgPath string) error {
 		CallState: func() string { return projector.Snapshot().CallState },
 		AudioPort: cfg.MediaRTPAudioPort,
 		VideoPort: cfg.MediaRTPVideoPort,
-		RequireAV: config.RequireAVAddStream(cfg.DeviceModel),
 	})
 	mediaService := media.NewService(mediaBackend)
 	var rtspServer *rtspadapter.Server
@@ -306,7 +305,8 @@ func Run(ctx context.Context, cfgPath string) error {
 	var webrtcSvc *webrtc.Service
 	if cfg.MediaRTSPEnabled {
 		rtspServer = rtspadapter.NewServer(cfg, mediaService)
-		avBackend.SetVideoCounter(func() uint64 { return rtspServer.VideoIngestCount() })
+		avBackend.SetVideoRecentlyFlowing(rtspServer.VideoRecentlyFlowing)
+		avBackend.SetAudioRecentlyFlowing(rtspServer.AudioRecentlyFlowing)
 		snapshotService = snapshot.New(cfg, mediaService, rtspServer)
 		webrtcSvc, err = webrtc.New(mediaService, rtspServer, cfg.Entrypoints, cfg.IceServers)
 		if err != nil {

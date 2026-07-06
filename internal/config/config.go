@@ -454,14 +454,14 @@ func Save(path string, cfg Config) error {
 					Exposed:     boolPtr(cfg.ExposeVoicemailToggle),
 				},
 				WebAuth: persistedWebAuth,
-			WebRTC: PersistedWebRTC{
-				IceServers: func() []string {
-					if cfg.IceServers == nil {
-						return []string{}
-					}
-					return cfg.IceServers
-				}(),
-			},
+				WebRTC: PersistedWebRTC{
+					IceServers: func() []string {
+						if cfg.IceServers == nil {
+							return []string{}
+						}
+						return cfg.IceServers
+					}(),
+				},
 				WebUI: PersistedWebUI{
 					ListenAddr: strings.TrimSpace(cfg.WebUI.ListenAddr),
 					TLS: PersistedWebUITLS{
@@ -749,10 +749,6 @@ func normalizeName(raw string) string {
 
 func DefaultAVHighResVideo(deviceModel string) bool {
 	return !strings.EqualFold(strings.TrimSpace(deviceModel), "C100X")
-}
-
-func RequireAVAddStream(deviceModel string) bool {
-	return strings.EqualFold(strings.TrimSpace(deviceModel), "C100X")
 }
 
 var c100xModulesPath = "/home/bticino/cfg/extra/.bt_eliot/mymodules"

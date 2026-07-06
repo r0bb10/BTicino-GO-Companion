@@ -211,18 +211,6 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	offerCtx, cancel := context.WithTimeout(ctx, defaultAnswerTimeout)
 	defer cancel()
 
-	if err := s.stream.ReaderJoin(offerCtx, sessionID, entrypointID, devAddr); err != nil {
-		logger.Warnf(tag, "reader join failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
-		return OfferResult{}, err
-	}
-	logger.Infof(tag, "reader joined session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
-	joined := true
-	defer func() {
-		if joined {
-			_ = s.stream.ReaderLeave(context.Background(), sessionID)
-		}
-	}()
-
 	videoTrack, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
 		MimeType:    webrtc.MimeTypeH264,
 		ClockRate:   90000,
@@ -240,7 +228,9 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	if err != nil {
 		return OfferResult{}, fmt.Errorf("create audio track: %w", err)
 	}
-	audioDirection := answerDirectionFromOfferAudio(offerSDP)
+	offeredAudioDirection := offeredAudioDirection(offerSDP)
+	audioDirection := answerDirectionForOfferedAudio(offeredAudioDirection)
+	logger.Infof(tag, "audio direction session=%s offered=%s answer=%s", sessionID, offeredAudioDirection.String(), audioDirection.String())
 
 	cfg := webrtc.Configuration{}
 	if len(s.iceServers) > 0 {
@@ -344,6 +334,20 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	}
 	s.sessions[sessionID] = sess
 	s.mu.Unlock()
+	joined := false
+	defer func() {
+		if joined {
+			_ = s.stream.ReaderLeave(context.Background(), sessionID)
+		}
+	}()
+
+	if err := s.stream.ReaderJoin(offerCtx, sessionID, entrypointID, devAddr); err != nil {
+		s.closeSession(sessionID)
+		logger.Warnf(tag, "reader join failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
+		return OfferResult{}, err
+	}
+	joined = true
+	logger.Infof(tag, "reader joined session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
 
 	offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerSDP}
 	if err := pc.SetRemoteDescription(offer); err != nil {
@@ -655,7 +659,10 @@ func canonicalizeSDP(raw string) string {
 }
 
 func answerDirectionFromOfferAudio(offerSDP string) webrtc.RTPTransceiverDirection {
-	offered := offeredAudioDirection(offerSDP)
+	return answerDirectionForOfferedAudio(offeredAudioDirection(offerSDP))
+}
+
+func answerDirectionForOfferedAudio(offered webrtc.RTPTransceiverDirection) webrtc.RTPTransceiverDirection {
 	switch offered {
 	case webrtc.RTPTransceiverDirectionRecvonly:
 		return webrtc.RTPTransceiverDirectionSendonly

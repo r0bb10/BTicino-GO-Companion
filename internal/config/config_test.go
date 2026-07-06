@@ -155,15 +155,6 @@ func TestC100XUsesLowResAVDefault(t *testing.T) {
 	}
 }
 
-func TestAVAddStreamRequirementByModel(t *testing.T) {
-	if RequireAVAddStream("C300X") {
-		t.Fatal("expected C300X AV add-stream to be optional after SIP success")
-	}
-	if !RequireAVAddStream("C100X") {
-		t.Fatal("expected C100X AV add-stream to be required")
-	}
-}
-
 func TestResolveDefaultStreamDevAddr(t *testing.T) {
 	if got := ResolveDefaultStreamDevAddr("C300X", "20"); got != "20" {
 		t.Fatalf("expected C300X stream devaddr fallback 20, got %q", got)
