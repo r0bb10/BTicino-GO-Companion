@@ -48,11 +48,11 @@ func NewAVMediaClient(cfg config.Config) *AVMediaClient {
 		replyTimeout: 5 * time.Second,
 		retryDelay:   300 * time.Millisecond,
 		maxAttempts:  3,
-		audioDelay:   300 * time.Millisecond,
+		audioDelay:   50 * time.Millisecond,
 
 		flowConfirmTimeout: 1200 * time.Millisecond,
 		flowConfirmPoll:    100 * time.Millisecond,
-		flowRecentWindow:   5 * time.Second,
+		flowRecentWindow:   2 * time.Second,
 	}
 }
 
@@ -86,6 +86,11 @@ func (c *AVMediaClient) StreamStart(ctx context.Context, audioPort, videoPort in
 			}
 		}
 	}
+	if !c.waitForFlow(ctx, c.isVideoFlowing) {
+		err := errors.New("video rtp did not start")
+		logger.Errorf(tag, "add-video-stream failed reason=video_not_flowing audio_port=%d video_port=%d", audioPort, videoPort)
+		return err
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -105,6 +110,11 @@ func (c *AVMediaClient) StreamStart(ctx context.Context, audioPort, videoPort in
 			logger.Errorf(tag, "add-audio-stream failed audio_port=%d video_port=%d err=%v", audioPort, videoPort, err)
 			return err
 		}
+	}
+	if !c.waitForFlow(ctx, c.isAudioFlowing) {
+		err := errors.New("audio rtp did not start")
+		logger.Errorf(tag, "add-audio-stream failed reason=audio_not_flowing audio_port=%d video_port=%d", audioPort, videoPort)
+		return err
 	}
 	logger.Infof(tag, "stream start complete audio_port=%d video_port=%d highres=%t", audioPort, videoPort, c.highRes)
 	return nil
@@ -183,7 +193,9 @@ func (c *AVMediaClient) exchange(frame string) (string, error) {
 		c.closeConnLocked()
 		return "", fmt.Errorf("read reply: %w", err)
 	}
-	return strings.TrimSpace(string(buf[:n])), nil
+	reply := strings.TrimSpace(string(buf[:n]))
+	c.closeConnLocked()
+	return reply, nil
 }
 
 func (c *AVMediaClient) closeConn() {

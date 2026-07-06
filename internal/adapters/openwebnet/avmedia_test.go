@@ -88,9 +88,19 @@ func newTestAVClient(t *testing.T, s *fakeAVServer, highRes bool) *AVMediaClient
 	return c
 }
 
+func setFlowAfterFrames(c *AVMediaClient, s *fakeAVServer, videoAfter, audioAfter int) {
+	c.SetVideoRecentlyFlowing(func(time.Duration) bool {
+		return len(s.receivedFrames()) >= videoAfter
+	})
+	c.SetAudioRecentlyFlowing(func(time.Duration) bool {
+		return len(s.receivedFrames()) >= audioAfter
+	})
+}
+
 func TestAVMediaClientStreamStartSendsVideoThenAudio(t *testing.T) {
 	srv := newFakeAVServer(t, "*#*1##", "*#*1##")
 	c := newTestAVClient(t, srv, false)
+	setFlowAfterFrames(c, srv, 1, 2)
 
 	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
 		t.Fatalf("stream start failed: %v", err)
@@ -110,6 +120,7 @@ func TestAVMediaClientStreamStartSendsVideoThenAudio(t *testing.T) {
 func TestAVMediaClientHighResVideoFrame(t *testing.T) {
 	srv := newFakeAVServer(t, "*#*1##", "*#*1##")
 	c := newTestAVClient(t, srv, true)
+	setFlowAfterFrames(c, srv, 1, 2)
 
 	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
 		t.Fatalf("stream start failed: %v", err)
@@ -122,6 +133,7 @@ func TestAVMediaClientHighResVideoFrame(t *testing.T) {
 func TestAVMediaClientRetriesVideoOnNAK(t *testing.T) {
 	srv := newFakeAVServer(t, "*#*0##", "*#*1##", "*#*1##")
 	c := newTestAVClient(t, srv, false)
+	setFlowAfterFrames(c, srv, 2, 3)
 
 	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
 		t.Fatalf("expected retry to recover from NAK: %v", err)
@@ -150,9 +162,7 @@ func TestAVMediaClientVideoNAKContinuesWhenVideoFlowing(t *testing.T) {
 	c := newTestAVClient(t, srv, false)
 	c.flowConfirmTimeout = 200 * time.Millisecond
 	c.flowConfirmPoll = 10 * time.Millisecond
-	flowing := false
-	c.SetVideoRecentlyFlowing(func(time.Duration) bool { return flowing })
-	time.AfterFunc(20*time.Millisecond, func() { flowing = true })
+	setFlowAfterFrames(c, srv, 3, 4)
 
 	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
 		t.Fatalf("video NAK with progressing RTP must not fail stream start: %v", err)
@@ -166,6 +176,7 @@ func TestAVMediaClientVideoNAKContinuesWhenVideoFlowing(t *testing.T) {
 func TestAVMediaClientFailsWhenAudioCommandRejectedAndAudioNotFlowing(t *testing.T) {
 	srv := newFakeAVServer(t, "*#*1##", "*#*0##", "*#*0##", "*#*0##")
 	c := newTestAVClient(t, srv, false)
+	c.SetVideoRecentlyFlowing(func(time.Duration) bool { return len(srv.receivedFrames()) >= 1 })
 
 	err := c.StreamStart(context.Background(), 5000, 5007)
 	if err == nil {
@@ -185,9 +196,7 @@ func TestAVMediaClientAcceptsAudioNAKWhenAudioStartsFlowing(t *testing.T) {
 	c.audioDelay = 0
 	c.flowConfirmTimeout = 200 * time.Millisecond
 	c.flowConfirmPoll = 10 * time.Millisecond
-	flowing := false
-	c.SetAudioRecentlyFlowing(func(time.Duration) bool { return flowing })
-	time.AfterFunc(5*time.Millisecond, func() { flowing = true })
+	setFlowAfterFrames(c, srv, 1, 2)
 
 	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
 		t.Fatalf("audio NAK with progressing RTP must not fail stream start: %v", err)
@@ -200,9 +209,8 @@ func TestAVMediaClientAcceptsAudioNAKWhenAudioStartsFlowing(t *testing.T) {
 func TestAVMediaClientSkipsAudioCommandWhenAudioAlreadyFlows(t *testing.T) {
 	srv := newFakeAVServer(t, "*#*1##")
 	c := newTestAVClient(t, srv, false)
-	flowing := false
-	c.SetAudioRecentlyFlowing(func(time.Duration) bool { return flowing })
-	time.AfterFunc(time.Millisecond, func() { flowing = true })
+	c.SetVideoRecentlyFlowing(func(time.Duration) bool { return len(srv.receivedFrames()) >= 1 })
+	c.SetAudioRecentlyFlowing(func(time.Duration) bool { return true })
 
 	if err := c.StreamStart(context.Background(), 5000, 5007); err != nil {
 		t.Fatalf("stream start failed: %v", err)

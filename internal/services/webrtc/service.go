@@ -22,9 +22,10 @@ import (
 const tag = "services.webrtc"
 
 const (
-	defaultGatherTimeout = 5 * time.Second
-	defaultAnswerTimeout = 8 * time.Second
-	webrtcOpusFMTP       = "minptime=10;useinbandfec=0;stereo=0;sprop-stereo=0"
+	defaultGatherTimeout      = 5 * time.Second
+	defaultAnswerTimeout      = 8 * time.Second
+	defaultStreamStartTimeout = 12 * time.Second
+	webrtcOpusFMTP            = "minptime=10;useinbandfec=0;stereo=0;sprop-stereo=0"
 
 	pendingCandidateTTL         = 45 * time.Second
 	maxPendingSessionCandidates = 64
@@ -103,6 +104,7 @@ type session struct {
 	candidates           []Candidate
 	pendingRemoteICE     []webrtc.ICECandidateInit
 	remoteDescriptionSet bool
+	startCancel          context.CancelFunc
 	closeOnce            sync.Once
 }
 
@@ -350,21 +352,6 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	}
 	s.sessions[sessionID] = sess
 	s.mu.Unlock()
-	joined := false
-	defer func() {
-		if joined {
-			_ = s.stream.ReaderLeave(context.Background(), sessionID)
-		}
-	}()
-
-	if err := s.stream.ReaderJoin(offerCtx, sessionID, entrypointID, devAddr); err != nil {
-		s.closeSession(sessionID)
-		logger.Warnf(tag, "reader join failed session=%s entrypoint=%s devaddr=%s err=%v", sessionID, entrypointID, devAddr, err)
-		return OfferResult{}, err
-	}
-	joined = true
-	logger.Infof(tag, "reader joined session=%s entrypoint=%s devaddr=%s", sessionID, entrypointID, devAddr)
-
 	offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offerSDP}
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		s.closeSession(sessionID)
@@ -411,8 +398,8 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 	sess.mu.Lock()
 	candidates := append([]Candidate(nil), sess.candidates...)
 	sess.mu.Unlock()
-	joined = false
 	logger.Infof(tag, "offer answered session=%s entrypoint=%s candidates=%d answer_len=%d", sessionID, entrypointID, len(candidates), len(local.SDP))
+	s.startReader(sess)
 
 	return OfferResult{
 		SessionID:    sessionID,
@@ -420,6 +407,41 @@ func (s *Service) HandleOffer(ctx context.Context, sessionID string, entrypointI
 		AnswerSDP:    local.SDP,
 		Candidates:   candidates,
 	}, nil
+}
+
+func (s *Service) startReader(sess *session) {
+	if s.stream == nil || sess == nil {
+		return
+	}
+	startCtx, cancel := context.WithTimeout(context.Background(), defaultStreamStartTimeout)
+	sess.mu.Lock()
+	sess.startCancel = cancel
+	sess.mu.Unlock()
+
+	go func() {
+		defer func() {
+			sess.mu.Lock()
+			sess.startCancel = nil
+			sess.mu.Unlock()
+			cancel()
+		}()
+
+		if err := s.stream.ReaderJoin(startCtx, sess.id, sess.entrypointID, sess.devAddr); err != nil {
+			s.closeSession(sess.id)
+			logger.Warnf(tag, "reader join failed session=%s entrypoint=%s devaddr=%s err=%v", sess.id, sess.entrypointID, sess.devAddr, err)
+			return
+		}
+
+		s.mu.RLock()
+		current := s.sessions[sess.id] == sess
+		s.mu.RUnlock()
+		if !current {
+			_ = s.stream.ReaderLeave(context.Background(), sess.id)
+			return
+		}
+
+		logger.Infof(tag, "reader joined session=%s entrypoint=%s devaddr=%s", sess.id, sess.entrypointID, sess.devAddr)
+	}()
 }
 
 func (s *Service) AddCandidate(sessionID string, candidate Candidate) error {
@@ -532,6 +554,13 @@ func (s *Service) closeSession(sessionID string) error {
 		delete(s.sessions, sessionID)
 		delete(s.pendingCandidates, sessionID)
 		s.mu.Unlock()
+		sess.mu.Lock()
+		cancel := sess.startCancel
+		sess.startCancel = nil
+		sess.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		if err := sess.pc.Close(); err != nil {
 			logger.Warnf(tag, "close peer connection session=%s err=%v", sessionID, err)
 		}

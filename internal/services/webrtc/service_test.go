@@ -17,6 +17,23 @@ type lifecycleStub struct{}
 func (l lifecycleStub) ReaderJoin(context.Context, string, string, string) error { return nil }
 func (l lifecycleStub) ReaderLeave(context.Context, string) error                { return nil }
 
+type blockingLifecycle struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (l *blockingLifecycle) ReaderJoin(ctx context.Context, _ string, _ string, _ string) error {
+	close(l.started)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-l.release:
+		return nil
+	}
+}
+
+func (l *blockingLifecycle) ReaderLeave(context.Context, string) error { return nil }
+
 func newServiceForTest(t *testing.T) *Service {
 	t.Helper()
 	return newServiceForTestWithStream(t, nil, nil)
@@ -56,6 +73,46 @@ func TestHandleOfferAdvertisesMonoOpusFMTP(t *testing.T) {
 	if !strings.Contains(result.AnswerSDP, "a=fmtp:111") || !strings.Contains(result.AnswerSDP, "stereo=0") || !strings.Contains(result.AnswerSDP, "sprop-stereo=0") {
 		t.Fatalf("expected mono opus fmtp in answer SDP:\n%s", result.AnswerSDP)
 	}
+}
+
+func TestHandleOfferReturnsAnswerBeforeReaderJoinCompletes(t *testing.T) {
+	lifecycle := &blockingLifecycle{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	svc := newServiceForTestWithStream(t, lifecycle, []entrypoint.Model{{ID: "main", DevAddr: "20", HasStream: true}})
+	offer := newBrowserLikeOffer(t)
+	done := make(chan struct {
+		result OfferResult
+		err    error
+	}, 1)
+
+	go func() {
+		result, err := svc.HandleOffer(context.Background(), "session-1", "main", offer)
+		done <- struct {
+			result OfferResult
+			err    error
+		}{result: result, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("handle offer: %v", got.err)
+		}
+		if strings.TrimSpace(got.result.AnswerSDP) == "" {
+			t.Fatal("expected answer SDP")
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("HandleOffer waited for ReaderJoin instead of returning the SDP answer")
+	}
+
+	select {
+	case <-lifecycle.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected async ReaderJoin to start")
+	}
+	close(lifecycle.release)
 }
 
 func newBrowserLikeOffer(t *testing.T) string {
