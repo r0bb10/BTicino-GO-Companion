@@ -11,6 +11,8 @@ const (
 	TypeCallAnswered      = "call.answered"
 	TypeCallEnded         = "call.ended"
 	TypeCallViewRequested = "call.view_requested"
+	TypePreviewStarted    = "preview.started"
+	TypePreviewStopped    = "preview.stopped"
 	TypeStreamStarted     = "stream.started"
 	TypeStreamStopped     = "stream.stopped"
 	TypeUnlockPulseStart  = "unlock.pulse.started"
@@ -33,6 +35,8 @@ var knownTypes = map[string]struct{}{
 	TypeCallAnswered:      {},
 	TypeCallEnded:         {},
 	TypeCallViewRequested: {},
+	TypePreviewStarted:    {},
+	TypePreviewStopped:    {},
 	TypeStreamStarted:     {},
 	TypeStreamStopped:     {},
 	TypeUnlockPulseStart:  {},

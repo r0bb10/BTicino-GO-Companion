@@ -21,13 +21,16 @@ func TestProjectorApply(t *testing.T) {
 	if !s.StreamActive {
 		t.Fatalf("stream should be active: %+v", s)
 	}
+	if s.StreamState != StreamStateActive {
+		t.Fatalf("stream state should be active: %+v", s)
+	}
 	if s.ActiveEntrypoint != "main" {
 		t.Fatalf("expected active entrypoint main, got %q", s.ActiveEntrypoint)
 	}
 	p.Apply(event.Envelope{Type: event.TypeRingEnded, TS: now})
 	p.Apply(event.Envelope{Type: event.TypeStreamStopped, TS: now})
 	s = p.Snapshot()
-	if s.StreamActive || s.CallState != CallStateIdle {
+	if s.StreamActive || s.StreamState != StreamStateIdle || s.CallState != CallStateIdle {
 		t.Fatalf("stream stop not applied: %+v", s)
 	}
 	if s.ActiveEntrypoint != "" {
@@ -47,7 +50,7 @@ func TestProjectorHeartbeatDoesNotMutateState(t *testing.T) {
 	if before.LastEventType != after.LastEventType {
 		t.Fatalf("heartbeat should not update last event type: before=%s after=%s", before.LastEventType, after.LastEventType)
 	}
-	if before.CallState != after.CallState || before.ActiveEntrypoint != after.ActiveEntrypoint || before.StreamActive != after.StreamActive || before.Ringing != after.Ringing {
+	if before.CallState != after.CallState || before.StreamState != after.StreamState || before.ActiveEntrypoint != after.ActiveEntrypoint || before.StreamActive != after.StreamActive || before.TalkEnabled != after.TalkEnabled || before.Ringing != after.Ringing {
 		t.Fatalf("heartbeat should not mutate state: before=%+v after=%+v", before, after)
 	}
 }

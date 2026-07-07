@@ -53,7 +53,9 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 	response := map[string]any{
 		"boot_time":         snap.BootTime,
 		"call_state":        snap.CallState,
+		"stream_state":      snap.StreamState,
 		"stream_active":     snap.StreamActive,
+		"talk_enabled":      snap.TalkEnabled,
 		"active_entrypoint": stateEntrypointValue(snap.ActiveEntrypoint),
 		"audio": map[string]any{
 			"muted": snap.AudioMuted,

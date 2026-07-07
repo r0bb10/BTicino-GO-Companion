@@ -11,7 +11,9 @@ import (
 type Snapshot struct {
 	BootTime                       time.Time          `json:"boot_time"`
 	CallState                      string             `json:"call_state"`
+	StreamState                    string             `json:"stream_state"`
 	StreamActive                   bool               `json:"stream_active"`
+	TalkEnabled                    bool               `json:"talk_enabled"`
 	AudioMuted                     bool               `json:"audio_muted"`
 	VoicemailEnabled               bool               `json:"voicemail_enabled"`
 	VoicemailWelcomeMessageEnabled bool               `json:"voicemail_welcome_message_enabled"`
@@ -33,8 +35,10 @@ func NewProjector(entrypoints []entrypoint.Model) *Projector {
 		snapshot: Snapshot{
 			BootTime:                       time.Now(),
 			CallState:                      CallStateIdle,
+			StreamState:                    StreamStateIdle,
 			Entrypoints:                    entrypoints,
 			StreamActive:                   false,
+			TalkEnabled:                    false,
 			AudioMuted:                     false,
 			VoicemailEnabled:               false,
 			VoicemailWelcomeMessageEnabled: false,

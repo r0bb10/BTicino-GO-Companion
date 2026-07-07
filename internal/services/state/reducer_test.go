@@ -18,16 +18,59 @@ func TestApplyTransitionStreamStopKeepsRingingState(t *testing.T) {
 	if s.StreamActive {
 		t.Fatal("expected stream inactive")
 	}
+	if s.StreamState != StreamStateIdle {
+		t.Fatalf("expected idle stream state, got %s", s.StreamState)
+	}
+	if s.TalkEnabled {
+		t.Fatal("expected talk disabled")
+	}
 	if s.CallState != CallStateRinging {
 		t.Fatalf("expected ringing state, got %s", s.CallState)
 	}
 }
 
 func TestApplyTransitionCallAnsweredSetsActive(t *testing.T) {
-	s := Snapshot{CallState: CallStateRinging}
+	s := Snapshot{CallState: CallStateRinging, StreamState: StreamStatePreview}
 	applyTransition(&s, event.Envelope{Type: event.TypeCallAnswered})
 	if s.CallState != CallStateActive {
 		t.Fatalf("expected active state, got %s", s.CallState)
+	}
+	if s.StreamState != StreamStateActive || !s.StreamActive {
+		t.Fatalf("expected active stream after answering preview, got state=%s active=%v", s.StreamState, s.StreamActive)
+	}
+	if !s.TalkEnabled {
+		t.Fatal("expected talk enabled")
+	}
+}
+
+func TestApplyTransitionPreviewDoesNotSetActiveCall(t *testing.T) {
+	s := Snapshot{CallState: CallStateRinging, Ringing: true}
+	applyTransition(&s, event.Envelope{Type: event.TypePreviewStarted, EntrypointID: "gate1"})
+	if s.CallState != CallStateRinging {
+		t.Fatalf("preview should keep ringing call state, got %s", s.CallState)
+	}
+	if s.StreamState != StreamStatePreview {
+		t.Fatalf("expected preview stream state, got %s", s.StreamState)
+	}
+	if s.StreamActive {
+		t.Fatal("preview should not mark active stream")
+	}
+	if s.TalkEnabled {
+		t.Fatal("preview should not enable talk")
+	}
+	if s.ActiveEntrypoint != "gate1" {
+		t.Fatalf("expected active entrypoint gate1, got %q", s.ActiveEntrypoint)
+	}
+
+	applyTransition(&s, event.Envelope{Type: event.TypePreviewStopped})
+	if s.StreamState != StreamStateIdle {
+		t.Fatalf("expected idle stream state after preview stop, got %s", s.StreamState)
+	}
+	if s.CallState != CallStateRinging {
+		t.Fatalf("preview stop during ring should keep ringing, got %s", s.CallState)
+	}
+	if s.TalkEnabled {
+		t.Fatal("expected talk disabled after preview stop")
 	}
 }
 
@@ -57,6 +100,9 @@ func TestApplyTransitionTracksActiveEntrypoint(t *testing.T) {
 	applyTransition(&s, event.Envelope{Type: event.TypeStreamStarted, EntrypointID: "gate2"})
 	if !s.StreamActive {
 		t.Fatal("expected stream active")
+	}
+	if s.StreamState != StreamStateActive {
+		t.Fatalf("expected active stream state, got %s", s.StreamState)
 	}
 	if s.ActiveEntrypoint != "gate2" {
 		t.Fatalf("expected gate2 while streaming, got %q", s.ActiveEntrypoint)
