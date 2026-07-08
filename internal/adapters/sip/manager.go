@@ -272,15 +272,19 @@ func (m *Manager) Hangup(ctx context.Context) error {
 	}
 
 	if activeOut != nil {
-		if err := activeOut.Bye(ctx); err != nil {
-			return fmt.Errorf("outgoing bye failed: %w", err)
-		}
+		byeErr := activeOut.Bye(ctx)
 		_ = activeOut.Close()
 		m.mu.Lock()
 		if m.activeOut == activeOut {
 			m.activeOut = nil
 		}
 		m.mu.Unlock()
+		if byeErr != nil && !isDialogGoneResponse(byeErr) {
+			return fmt.Errorf("outgoing bye failed: %w", byeErr)
+		}
+		if byeErr != nil {
+			logger.Infof(tag, "outgoing bye ignored because dialog is already gone err=%v", byeErr)
+		}
 		m.publish(event.TypeStreamStopped, map[string]any{"source": "sip", "reason": "local_hangup_outgoing"})
 		m.publish(event.TypeCallEnded, map[string]any{"source": "sip", "reason": "local_hangup_outgoing"})
 		return nil
@@ -439,6 +443,18 @@ func classifyInviteAnswerError(err error) error {
 		return fmt.Errorf("%w: %v", media.ErrSIPCallInProgress, err)
 	}
 	return fmt.Errorf("wait answer failed: %w", err)
+}
+
+func isDialogGoneResponse(err error) bool {
+	var dresPtr *sipgo.ErrDialogResponse
+	if errors.As(err, &dresPtr) && dresPtr != nil && dresPtr.Res != nil && dresPtr.Res.StatusCode == 481 {
+		return true
+	}
+	var dresVal sipgo.ErrDialogResponse
+	if errors.As(err, &dresVal) && dresVal.Res != nil && dresVal.Res.StatusCode == 481 {
+		return true
+	}
+	return false
 }
 
 func (m *Manager) StreamStop(ctx context.Context) error {

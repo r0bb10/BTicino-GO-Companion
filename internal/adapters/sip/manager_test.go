@@ -237,3 +237,24 @@ func TestClassifyInviteAnswerErrorMaps486(t *testing.T) {
 		t.Fatalf("404 must not map to ErrSIPCallInProgress: %v", err)
 	}
 }
+
+func TestIsDialogGoneResponseMaps481(t *testing.T) {
+	notFoundPtr := &sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 481}}
+	if !isDialogGoneResponse(notFoundPtr) {
+		t.Fatal("expected pointer-form 481 to be treated as dialog gone")
+	}
+
+	notFoundVal := sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 481}}
+	if !isDialogGoneResponse(notFoundVal) {
+		t.Fatal("expected value-form 481 to be treated as dialog gone")
+	}
+
+	busy := &sipgo.ErrDialogResponse{Res: &sip.Response{StatusCode: 486}}
+	if isDialogGoneResponse(busy) {
+		t.Fatal("486 must not be treated as dialog gone")
+	}
+
+	if isDialogGoneResponse(errors.New("network failed")) {
+		t.Fatal("non-dialog error must not be treated as dialog gone")
+	}
+}
