@@ -307,7 +307,7 @@ func Run(ctx context.Context, cfgPath string) error {
 		rtspServer = rtspadapter.NewServer(cfg, mediaService)
 		avBackend.SetVideoRecentlyFlowing(rtspServer.VideoRecentlyFlowing)
 		avBackend.SetAudioRecentlyFlowing(rtspServer.AudioRecentlyFlowing)
-		snapshotService = snapshot.New(cfg, mediaService, rtspServer)
+		snapshotService = snapshot.NewWithState(cfg, mediaService, rtspServer, projector)
 		webrtcSvc, err = webrtc.New(mediaService, rtspServer, cfg.Entrypoints, cfg.IceServers)
 		if err != nil {
 			logger.Errorf(mediaTag, "webrtc init failed err=%v", err)

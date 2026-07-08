@@ -17,6 +17,7 @@ import (
 	"bticino-go-companion/internal/domain/entrypoint"
 	"bticino-go-companion/internal/logger"
 	"bticino-go-companion/internal/services/media"
+	"bticino-go-companion/internal/services/state"
 )
 
 const tag = "services.snapshot"
@@ -45,9 +46,22 @@ type mirrorDriver interface {
 	BeginSnapshotMirror() (int, func(), error)
 }
 
+type stateDriver interface {
+	Snapshot() state.Snapshot
+}
+
+type captureSourceSelection struct {
+	UseExisting bool
+	Blocked     bool
+	Mode        string
+	Entrypoint  string
+	Reason      string
+}
+
 type Service struct {
 	stream         streamDriver
 	mirror         mirrorDriver
+	state          stateDriver
 	snapshotsDir   string
 	entrypoints    map[string]entrypoint.Model
 	captureTimeout time.Duration
@@ -57,6 +71,10 @@ type Service struct {
 }
 
 func New(cfg config.Config, stream streamDriver, mirror mirrorDriver) *Service {
+	return NewWithState(cfg, stream, mirror, nil)
+}
+
+func NewWithState(cfg config.Config, stream streamDriver, mirror mirrorDriver, state stateDriver) *Service {
 	index := make(map[string]entrypoint.Model, len(cfg.Entrypoints))
 	for _, ep := range cfg.Entrypoints {
 		id := strings.TrimSpace(ep.ID)
@@ -68,6 +86,7 @@ func New(cfg config.Config, stream streamDriver, mirror mirrorDriver) *Service {
 	svc := &Service{
 		stream:         stream,
 		mirror:         mirror,
+		state:          state,
 		snapshotsDir:   filepath.Join(cfg.DataDir, "media", "snapshots"),
 		entrypoints:    index,
 		captureTimeout: defaultCaptureTimeout,
@@ -100,28 +119,10 @@ func (s *Service) Capture(ctx context.Context, entrypointID string) ([]byte, err
 	}
 
 	before := s.stream.Snapshot()
-	if before.StreamActive && before.ActiveEntrypoint != "" && before.ActiveEntrypoint != ep.ID {
-		logger.Warnf(tag, "capture blocked entrypoint=%s active_entrypoint=%s", ep.ID, before.ActiveEntrypoint)
+	selection := s.selectCaptureSource(ep.ID, before)
+	if selection.Blocked {
+		logger.Warnf(tag, "capture blocked entrypoint=%s active_entrypoint=%s mode=%s reason=%s", ep.ID, selection.Entrypoint, selection.Mode, selection.Reason)
 		return nil, ErrActiveEntrypointBlocked
-	}
-
-	startedBySnapshot := false
-	if !before.StreamActive {
-		if err := s.stream.StartForEntrypoint(ctx, ep.ID, ep.DevAddr); err != nil {
-			logger.Warnf(tag, "capture failed entrypoint=%s step=start_stream err=%v", ep.ID, err)
-			return nil, err
-		}
-		startedBySnapshot = true
-		logger.Debugf(tag, "capture started stream entrypoint=%s", ep.ID)
-	}
-	if startedBySnapshot {
-		defer func() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := s.stream.StopForEntrypoint(stopCtx, ep.ID); err != nil {
-				logger.Warnf(tag, "stream stop failed entrypoint=%s err=%v", ep.ID, err)
-			}
-		}()
 	}
 
 	port, stopMirror, err := s.mirror.BeginSnapshotMirror()
@@ -138,13 +139,43 @@ func (s *Service) Capture(ctx context.Context, entrypointID string) ([]byte, err
 
 	captureCtx, cancel := context.WithTimeout(ctx, s.captureTimeout)
 	defer cancel()
-	if err := s.runCapturePipeline(captureCtx, port, tmpPath); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(captureCtx.Err(), context.DeadlineExceeded) {
+
+	startedBySnapshot := false
+	var pipelineErr error
+	if selection.UseExisting {
+		logger.Debugf(tag, "capture using existing media entrypoint=%s active_entrypoint=%s mode=%s reason=%s", ep.ID, selection.Entrypoint, selection.Mode, selection.Reason)
+		pipelineErr = s.runCapturePipeline(captureCtx, port, tmpPath, nil)
+	} else {
+		pipelineDone, err := s.startCapturePipeline(captureCtx, port, tmpPath)
+		if err != nil {
+			pipelineErr = err
+		} else if err := s.stream.StartForEntrypoint(ctx, ep.ID, ep.DevAddr); err != nil {
+			cancel()
+			<-pipelineDone
+			logger.Warnf(tag, "capture failed entrypoint=%s step=start_stream err=%v", ep.ID, err)
+			return nil, err
+		} else {
+			startedBySnapshot = true
+			logger.Debugf(tag, "capture started stream entrypoint=%s", ep.ID)
+			pipelineErr = <-pipelineDone
+		}
+	}
+	if startedBySnapshot {
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.stream.StopForEntrypoint(stopCtx, ep.ID); err != nil {
+				logger.Warnf(tag, "stream stop failed entrypoint=%s err=%v", ep.ID, err)
+			}
+		}()
+	}
+	if pipelineErr != nil {
+		if errors.Is(pipelineErr, context.DeadlineExceeded) || errors.Is(captureCtx.Err(), context.DeadlineExceeded) {
 			logger.Warnf(tag, "capture timed out entrypoint=%s timeout=%s", ep.ID, s.captureTimeout)
 			return nil, ErrSnapshotTimeout
 		}
-		logger.Warnf(tag, "capture failed entrypoint=%s step=pipeline err=%v", ep.ID, err)
-		return nil, err
+		logger.Warnf(tag, "capture failed entrypoint=%s step=pipeline err=%v", ep.ID, pipelineErr)
+		return nil, pipelineErr
 	}
 
 	info, err := os.Stat(tmpPath)
@@ -180,7 +211,25 @@ func (s *Service) Latest(entrypointID string) (string, error) {
 	return path, nil
 }
 
-func (s *Service) runCapturePipeline(ctx context.Context, port int, outputPath string) error {
+func (s *Service) startCapturePipeline(ctx context.Context, port int, outputPath string) (<-chan error, error) {
+	started := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- s.runCapturePipeline(ctx, port, outputPath, started)
+	}()
+	select {
+	case err := <-started:
+		if err != nil {
+			<-done
+			return nil, err
+		}
+		return done, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *Service) runCapturePipeline(ctx context.Context, port int, outputPath string, started chan<- error) error {
 	caps := "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
 	args := []string{
 		"-q",
@@ -204,7 +253,13 @@ func (s *Service) runCapturePipeline(ctx context.Context, port int, outputPath s
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	if err := cmd.Start(); err != nil {
+		if started != nil {
+			started <- err
+		}
 		return fmt.Errorf("start snapshot pipeline: %w", err)
+	}
+	if started != nil {
+		started <- nil
 	}
 
 	waitCh := make(chan error, 1)
@@ -274,6 +329,34 @@ func (s *Service) entrypoint(id string) (entrypoint.Model, error) {
 		return entrypoint.Model{}, ErrCapabilityNotEnabled
 	}
 	return ep, nil
+}
+
+func (s *Service) selectCaptureSource(entrypointID string, mediaSnapshot media.Snapshot) captureSourceSelection {
+	entrypointID = strings.TrimSpace(entrypointID)
+	if s.state != nil {
+		stateSnapshot := s.state.Snapshot()
+		mode := strings.TrimSpace(stateSnapshot.StreamState)
+		activeEntrypoint := strings.TrimSpace(stateSnapshot.ActiveEntrypoint)
+		switch mode {
+		case state.StreamStatePreview, state.StreamStateActive:
+			if activeEntrypoint != "" && activeEntrypoint != "none" {
+				if activeEntrypoint != entrypointID {
+					return captureSourceSelection{Blocked: true, Mode: mode, Entrypoint: activeEntrypoint, Reason: "state_active_entrypoint_mismatch"}
+				}
+				return captureSourceSelection{UseExisting: true, Mode: mode, Entrypoint: activeEntrypoint, Reason: "state_media_active"}
+			}
+		}
+	}
+
+	activeEntrypoint := strings.TrimSpace(mediaSnapshot.ActiveEntrypoint)
+	if mediaSnapshot.StreamActive {
+		if activeEntrypoint != "" && activeEntrypoint != entrypointID {
+			return captureSourceSelection{Blocked: true, Mode: "media", Entrypoint: activeEntrypoint, Reason: "media_active_entrypoint_mismatch"}
+		}
+		return captureSourceSelection{UseExisting: true, Mode: "media", Entrypoint: activeEntrypoint, Reason: "media_stream_active"}
+	}
+
+	return captureSourceSelection{UseExisting: false, Mode: state.StreamStateIdle, Reason: "idle"}
 }
 
 func isCompleteJPEG(path string) (bool, error) {
