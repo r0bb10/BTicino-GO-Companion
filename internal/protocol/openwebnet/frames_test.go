@@ -30,8 +30,8 @@ func TestFramePredicates(t *testing.T) {
 	if !IsRingStart("*8*1#1#4#10*21##") {
 		t.Fatal("expected ring start")
 	}
-	if !IsFloorRingStart("*7*59#12#0#0*##") {
-		t.Fatal("expected floor ring start")
+	if !IsUnmappedRingFrame("*7*59#12#0#0*##") {
+		t.Fatal("expected unmapped ring frame predicate")
 	}
 	if !IsStreamStop("*7*0*##") {
 		t.Fatal("expected stream stop")

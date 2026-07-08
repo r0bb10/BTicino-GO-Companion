@@ -32,7 +32,10 @@ const (
 	FrameDiagDistributionCmd = "*#13**24##"
 )
 
-var voicemailStatusFrameRegexp = regexp.MustCompile(`^\*#8\*\*40\*([01])\*([01])(?:\*.*)?##$`)
+var (
+	voicemailStatusFrameRegexp = regexp.MustCompile(`^\*#8\*\*40\*([01])\*([01])(?:\*.*)?##$`)
+	ringIdentityFrameRegexp    = regexp.MustCompile(`^\*8\*9#1#4\*([^#*]+)#2##$`)
+)
 
 func BuildUnlockOpen(devAddr string) string {
 	return fmt.Sprintf("*8*19*%s##", strings.TrimSpace(devAddr))
@@ -77,8 +80,25 @@ func IsViewRequest(frame string) bool {
 	return strings.HasPrefix(strings.TrimSpace(frame), "*8*1#5#4#")
 }
 
-func IsFloorRingStart(frame string) bool {
+func IsUnmappedRingFrame(frame string) bool {
 	return strings.HasPrefix(strings.TrimSpace(frame), "*7*59#")
+}
+
+func ParseRingIdentityAddress(frame string) (string, bool) {
+	matches := ringIdentityFrameRegexp.FindStringSubmatch(strings.TrimSpace(frame))
+	if len(matches) < 2 {
+		return "", false
+	}
+	addr := strings.TrimSpace(matches[1])
+	if addr == "" {
+		return "", false
+	}
+	return addr, true
+}
+
+func IsRingIdentity(frame string) bool {
+	_, ok := ParseRingIdentityAddress(frame)
+	return ok
 }
 
 func IsUnlockOpen(frame string) bool {
@@ -163,6 +183,9 @@ func IsVoicemailStatus(frame string) bool {
 }
 
 func ExtractAddress(frame string) string {
+	if addr, ok := ParseRingIdentityAddress(frame); ok {
+		return addr
+	}
 	if IsViewRequest(frame) {
 		if addr := extractViewRequestAddress(frame); addr != "" {
 			return addr

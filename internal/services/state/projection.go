@@ -19,7 +19,6 @@ type Snapshot struct {
 	VoicemailWelcomeMessageEnabled bool               `json:"voicemail_welcome_message_enabled"`
 	ActiveEntrypoint               string             `json:"active_entrypoint,omitempty"`
 	Ringing                        bool               `json:"ringing"`
-	FloorRinging                   bool               `json:"floor_ringing"`
 	LastEventType                  string             `json:"last_event_type,omitempty"`
 	LastEventTS                    *time.Time         `json:"last_event_ts,omitempty"`
 	Entrypoints                    []entrypoint.Model `json:"entrypoints"`

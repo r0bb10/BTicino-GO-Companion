@@ -47,11 +47,6 @@ func (n *Normalizer) Normalize(ev event.Envelope) event.Envelope {
 		return ev
 	}
 
-	if isFloorEvent(ev.Type) {
-		ev.EntrypointID = "floor"
-		return ev
-	}
-
 	devAddr := strings.TrimSpace(stringPayload(ev.Payload, "devaddr"))
 	if devAddr == "" && strings.TrimSpace(ev.Raw) != "" {
 		devAddr = strings.TrimSpace(openwebnetproto.ExtractAddress(ev.Raw))
@@ -81,14 +76,5 @@ func stringPayload(payload map[string]any, key string) string {
 		return val.String()
 	default:
 		return ""
-	}
-}
-
-func isFloorEvent(kind string) bool {
-	switch strings.TrimSpace(kind) {
-	case event.TypeRingFloorStarted, event.TypeRingFloorEnded:
-		return true
-	default:
-		return false
 	}
 }

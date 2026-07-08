@@ -21,15 +21,16 @@ const (
 func applyTransition(s *Snapshot, ev event.Envelope) {
 	kind := strings.TrimSpace(ev.Type)
 	entrypointID := strings.TrimSpace(ev.EntrypointID)
-	setEntrypoint := entrypointID != "" && entrypointID != "floor"
+	setEntrypoint := entrypointID != ""
 
 	switch kind {
 	case event.TypeRingStarted:
+		if !setEntrypoint {
+			return
+		}
 		s.Ringing = true
 		s.CallState = CallStateRinging
-		if setEntrypoint {
-			s.ActiveEntrypoint = entrypointID
-		}
+		s.ActiveEntrypoint = entrypointID
 	case event.TypeRingEnded:
 		s.Ringing = false
 		if s.StreamActive {
@@ -39,17 +40,14 @@ func applyTransition(s *Snapshot, ev event.Envelope) {
 		s.CallState = CallStateIdle
 		s.TalkEnabled = false
 		s.ActiveEntrypoint = ""
-	case event.TypeRingFloorStarted:
-		s.FloorRinging = true
-	case event.TypeRingFloorEnded:
-		s.FloorRinging = false
 	case event.TypePreviewStarted:
+		if !setEntrypoint {
+			return
+		}
 		s.StreamState = StreamStatePreview
 		s.StreamActive = false
 		s.TalkEnabled = false
-		if setEntrypoint {
-			s.ActiveEntrypoint = entrypointID
-		}
+		s.ActiveEntrypoint = entrypointID
 		if s.CallState == "" || s.CallState == CallStateIdle {
 			s.CallState = CallStateRinging
 		}
@@ -80,11 +78,12 @@ func applyTransition(s *Snapshot, ev event.Envelope) {
 		s.CallState = CallStateIdle
 		s.ActiveEntrypoint = ""
 	case event.TypeCallIncoming:
+		if !setEntrypoint {
+			return
+		}
 		s.CallState = CallStateRinging
 		s.TalkEnabled = false
-		if setEntrypoint {
-			s.ActiveEntrypoint = entrypointID
-		}
+		s.ActiveEntrypoint = entrypointID
 	case event.TypeCallAnswered:
 		s.CallState = CallStateActive
 		s.TalkEnabled = true

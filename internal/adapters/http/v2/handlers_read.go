@@ -64,7 +64,6 @@ func (r *Router) handleState(w http.ResponseWriter, req *http.Request) {
 			"enabled":                 snap.VoicemailEnabled,
 			"welcome_message_enabled": snap.VoicemailWelcomeMessageEnabled,
 		},
-		"floor_ringing":   snap.FloorRinging,
 		"last_event_type": snap.LastEventType,
 		"last_event_ts":   snap.LastEventTS,
 		"device": map[string]any{

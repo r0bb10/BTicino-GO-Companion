@@ -8,9 +8,9 @@ import (
 )
 
 type Mapper struct {
-	floorRinging bool
-	recentFrames map[string]time.Time
-	dedupeWindow time.Duration
+	recentFrames     map[string]time.Time
+	dedupeWindow     time.Duration
+	pendingRingUntil time.Time
 }
 
 func NewMapper() *Mapper {
@@ -42,13 +42,21 @@ func (m *Mapper) Map(msg Message) []event.Envelope {
 	}
 
 	switch {
-	case IsFloorRingStart(raw):
-		if m.floorRinging {
+	case IsUnmappedRingFrame(raw):
+		return nil
+	case IsRingIdentity(raw):
+		if m.pendingRingUntil.IsZero() || now.After(m.pendingRingUntil) {
 			return nil
 		}
-		m.floorRinging = true
-		return []event.Envelope{newEvent(event.TypeRingFloorStarted, map[string]any{"raw": raw, "entrance": "floor"})}
+		devaddr, ok := ParseRingIdentityAddress(raw)
+		if !ok {
+			return nil
+		}
+		m.pendingRingUntil = time.Time{}
+		payload := map[string]any{"raw": raw, "entrance": "default", "devaddr": devaddr}
+		return []event.Envelope{newEvent(event.TypeRingStarted, payload), newEvent(event.TypeCallIncoming, payload)}
 	case IsRingStart(raw):
+		m.pendingRingUntil = now.Add(5 * time.Second)
 		payload := map[string]any{"raw": raw, "entrance": "default", "devaddr": ExtractAddress(raw)}
 		return []event.Envelope{newEvent(event.TypeRingStarted, payload), newEvent(event.TypeCallIncoming, payload)}
 	case IsViewRequest(raw):
@@ -90,16 +98,12 @@ func (m *Mapper) Map(msg Message) []event.Envelope {
 	case IsStreamProbe(raw):
 		return nil
 	case IsStreamStop(raw), IsFreeAVResources(raw):
-		events := []event.Envelope{
+		m.pendingRingUntil = time.Time{}
+		return []event.Envelope{
 			newEvent(event.TypeStreamStopped, map[string]any{"raw": raw}),
 			newEvent(event.TypeRingEnded, map[string]any{"raw": raw}),
 			newEvent(event.TypeCallEnded, map[string]any{"raw": raw}),
 		}
-		if m.floorRinging {
-			m.floorRinging = false
-			events = append(events, newEvent(event.TypeRingFloorEnded, map[string]any{"raw": raw, "entrance": "floor"}))
-		}
-		return events
 	default:
 		return nil
 	}

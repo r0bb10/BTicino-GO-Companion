@@ -74,19 +74,21 @@ func TestApplyTransitionPreviewDoesNotSetActiveCall(t *testing.T) {
 	}
 }
 
-func TestApplyTransitionFloorRingTogglesOnlyFloorFlag(t *testing.T) {
+func TestApplyTransitionIgnoresRingWithoutEntrypoint(t *testing.T) {
 	s := Snapshot{CallState: CallStateIdle}
-	applyTransition(&s, event.Envelope{Type: event.TypeRingFloorStarted})
-	if !s.FloorRinging {
-		t.Fatal("expected floor ringing true")
-	}
-	if s.CallState != CallStateIdle {
-		t.Fatalf("floor ring should not alter call state, got %s", s.CallState)
+	applyTransition(&s, event.Envelope{Type: event.TypeRingStarted})
+	if s.Ringing || s.CallState != CallStateIdle || s.ActiveEntrypoint != "" {
+		t.Fatalf("ring without entrypoint should not affect public state: %+v", s)
 	}
 
-	applyTransition(&s, event.Envelope{Type: event.TypeRingFloorEnded})
-	if s.FloorRinging {
-		t.Fatal("expected floor ringing false")
+	applyTransition(&s, event.Envelope{Type: event.TypeCallIncoming})
+	if s.Ringing || s.CallState != CallStateIdle || s.ActiveEntrypoint != "" {
+		t.Fatalf("incoming call without entrypoint should not affect public state: %+v", s)
+	}
+
+	applyTransition(&s, event.Envelope{Type: event.TypePreviewStarted})
+	if s.StreamState != "" || s.CallState != CallStateIdle || s.ActiveEntrypoint != "" {
+		t.Fatalf("preview without entrypoint should not affect public state: %+v", s)
 	}
 }
 

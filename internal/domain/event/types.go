@@ -5,8 +5,6 @@ const (
 	TypeHeartbeat         = "heartbeat"
 	TypeRingStarted       = "ring.started"
 	TypeRingEnded         = "ring.ended"
-	TypeRingFloorStarted  = "ring.floor.started"
-	TypeRingFloorEnded    = "ring.floor.ended"
 	TypeCallIncoming      = "call.incoming"
 	TypeCallAnswered      = "call.answered"
 	TypeCallEnded         = "call.ended"
@@ -29,8 +27,6 @@ var knownTypes = map[string]struct{}{
 	TypeHeartbeat:         {},
 	TypeRingStarted:       {},
 	TypeRingEnded:         {},
-	TypeRingFloorStarted:  {},
-	TypeRingFloorEnded:    {},
 	TypeCallIncoming:      {},
 	TypeCallAnswered:      {},
 	TypeCallEnded:         {},

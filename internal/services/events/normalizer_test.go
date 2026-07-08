@@ -35,11 +35,18 @@ func TestNormalizerAssignsEntrypointFromRawFrame(t *testing.T) {
 	}
 }
 
-func TestNormalizerAssignsFloorEntrypoint(t *testing.T) {
-	n := NewNormalizer(nil)
-	ev := n.Normalize(event.Envelope{Type: event.TypeRingFloorStarted, Source: event.SourceOpenWebNet})
-	if ev.EntrypointID != "floor" {
-		t.Fatalf("expected floor, got %q", ev.EntrypointID)
+func TestNormalizerAssignsEntrypointFromRawRingIdentityFrame(t *testing.T) {
+	n := NewNormalizer([]entrypoint.Model{{ID: "gate3", DevAddr: "22"}})
+	ev := n.Normalize(event.Envelope{
+		Type:   event.TypeRingStarted,
+		Source: event.SourceOpenWebNet,
+		Raw:    "*8*9#1#4*22#2##",
+	})
+	if ev.EntrypointID != "gate3" {
+		t.Fatalf("expected gate3, got %q", ev.EntrypointID)
+	}
+	if ev.Payload["devaddr"] != "22" {
+		t.Fatalf("expected payload devaddr 22, got %#v", ev.Payload["devaddr"])
 	}
 }
 

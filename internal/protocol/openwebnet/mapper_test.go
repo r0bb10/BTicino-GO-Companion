@@ -40,15 +40,71 @@ func TestMapperCoreFrames(t *testing.T) {
 	}
 }
 
-func TestMapperFloorRingLifecycle(t *testing.T) {
+func TestMapperIgnoresUnmappedFloorLikeRingFrames(t *testing.T) {
 	mapper := NewMapper()
 	events := mapper.Map(Message{System: "OPEN", Raw: "*7*59#12#0#0*##"})
-	if len(events) != 1 || events[0].Type != "ring.floor.started" {
-		t.Fatalf("unexpected floor start: %+v", events)
+	if len(events) != 0 {
+		t.Fatalf("expected unmapped frame to be ignored, got %+v", events)
 	}
 	events = mapper.Map(Message{System: "OPEN", Raw: "*7*0*##"})
-	if len(events) != 4 || events[3].Type != "ring.floor.ended" {
-		t.Fatalf("unexpected floor end flow: %+v", events)
+	if len(events) != 3 {
+		t.Fatalf("expected normal stop flow, got %+v", events)
+	}
+}
+
+func TestParseRingIdentityAddress(t *testing.T) {
+	addr, ok := ParseRingIdentityAddress("*8*9#1#4*22#2##")
+	if !ok {
+		t.Fatal("expected ring identity frame")
+	}
+	if addr != "22" {
+		t.Fatalf("expected address 22, got %q", addr)
+	}
+
+	if _, ok := ParseRingIdentityAddress("*8*9#1#4*22#3##"); ok {
+		t.Fatal("expected non-ring identity frame to be ignored")
+	}
+}
+
+func TestMapperCorrelatesRingIdentityAfterGenericRingStart(t *testing.T) {
+	mapper := NewMapper()
+	generic := mapper.Map(Message{System: "OPEN", Raw: "*8*1#1#4#21*4##"})
+	if len(generic) != 2 {
+		t.Fatalf("expected generic ring events, got %+v", generic)
+	}
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+		addr string
+	}{
+		{name: "gate2", raw: "*8*9#1#4*21#2##", addr: "21"},
+		{name: "gate3", raw: "*8*9#1#4*22#2##", addr: "22"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mapper := NewMapper()
+			mapper.Map(Message{System: "OPEN", Raw: "*8*1#1#4#21*4##"})
+			events := mapper.Map(Message{System: "aswm", Raw: tc.raw})
+			if len(events) != 2 {
+				t.Fatalf("expected correlated ring events, got %+v", events)
+			}
+			if events[0].Type != "ring.started" || events[1].Type != "call.incoming" {
+				t.Fatalf("unexpected event types: %+v", events)
+			}
+			for _, ev := range events {
+				if ev.Payload["devaddr"] != tc.addr {
+					t.Fatalf("expected devaddr %s, got %#v", tc.addr, ev.Payload["devaddr"])
+				}
+			}
+		})
+	}
+}
+
+func TestMapperIgnoresRingIdentityWithoutPendingRingStart(t *testing.T) {
+	mapper := NewMapper()
+	events := mapper.Map(Message{System: "aswm", Raw: "*8*9#1#4*22#2##"})
+	if len(events) != 0 {
+		t.Fatalf("expected uncorrelated ring identity to be ignored, got %+v", events)
 	}
 }
 
