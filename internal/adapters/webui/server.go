@@ -399,6 +399,16 @@ func (s *Server) handleLogging(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid log level", "levels": logger.Levels()})
 			return
 		}
+		cfg, err := config.Load(s.configPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "load config failed")
+			return
+		}
+		cfg.LogLevel = level.String()
+		if err := config.Save(s.configPath, cfg); err != nil {
+			writeError(w, http.StatusInternalServerError, "write config failed")
+			return
+		}
 		logger.SetLevel(level)
 		logger.Infof(loggingTag, "log level changed level=%s", level.String())
 		s.writeLoggingState(w)

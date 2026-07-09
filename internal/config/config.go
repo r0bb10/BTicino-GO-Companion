@@ -29,6 +29,7 @@ type Config struct {
 	Version                   string
 	GitSHA                    string
 	BuildDate                 string
+	LogLevel                  string
 	ListenAddr                string
 	DataDir                   string
 	ClaimCode                 string
@@ -168,6 +169,7 @@ type PersistedCompanionInfo struct {
 
 type PersistedCompanionConfig struct {
 	Entrypoints []entrypoint.Model        `json:"entrypoints"`
+	LogLevel    string                    `json:"log_level,omitempty"`
 	Audio       PersistedCompanionAudio   `json:"audio"`
 	Voicemail   PersistedCompanionMailbox `json:"voicemail"`
 	WebAuth     *PersistedWebAuth         `json:"web_auth,omitempty"`
@@ -214,6 +216,7 @@ func Default() Config {
 		Version:                   BuildVersion,
 		GitSHA:                    BuildGitSHA,
 		BuildDate:                 BuildDate,
+		LogLevel:                  "info",
 		ListenAddr:                "0.0.0.0:8080",
 		DataDir:                   "/home/bticino/cfg/extra/companion",
 		ClaimCode:                 "",
@@ -361,6 +364,9 @@ func Load(path string) (Config, error) {
 	if len(persisted.Companion.Config.Entrypoints) > 0 {
 		cfg.Entrypoints = persisted.Companion.Config.Entrypoints
 	}
+	if strings.TrimSpace(persisted.Companion.Config.LogLevel) != "" {
+		cfg.LogLevel = strings.TrimSpace(persisted.Companion.Config.LogLevel)
+	}
 	cfg.MuteEnabled = boolFromPtr(persisted.Companion.Config.Audio.Enabled, cfg.MuteEnabled)
 	cfg.ExposeMuteControl = boolFromPtr(persisted.Companion.Config.Audio.Exposed, cfg.ExposeMuteControl)
 	if strings.TrimSpace(persisted.Companion.Config.Voicemail.MessagesDir) != "" {
@@ -444,6 +450,7 @@ func Save(path string, cfg Config) error {
 			Auth: configAuthState(cfg),
 			Config: PersistedCompanionConfig{
 				Entrypoints: cfg.Entrypoints,
+				LogLevel:    strings.TrimSpace(cfg.LogLevel),
 				Audio: PersistedCompanionAudio{
 					Enabled: boolPtr(cfg.MuteEnabled),
 					Exposed: boolPtr(cfg.ExposeMuteControl),
@@ -512,6 +519,7 @@ func (c *Config) normalize() {
 	c.Version = strings.TrimSpace(c.Version)
 	c.GitSHA = strings.TrimSpace(c.GitSHA)
 	c.BuildDate = strings.TrimSpace(c.BuildDate)
+	c.LogLevel = strings.ToLower(strings.TrimSpace(c.LogLevel))
 	if c.Version == "" {
 		c.Version = BuildVersion
 	}
@@ -520,6 +528,9 @@ func (c *Config) normalize() {
 	}
 	if c.BuildDate == "" {
 		c.BuildDate = BuildDate
+	}
+	if c.LogLevel == "" {
+		c.LogLevel = "info"
 	}
 	if strings.TrimSpace(c.ListenAddr) == "" {
 		c.ListenAddr = "0.0.0.0:8080"

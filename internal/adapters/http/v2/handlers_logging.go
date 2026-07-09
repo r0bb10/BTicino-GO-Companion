@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 
+	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/logger"
 )
 
@@ -29,6 +30,16 @@ func (r *Router) handleLogging(w http.ResponseWriter, req *http.Request) {
 		level, err := logger.ParseLevel(body.Level)
 		if err != nil {
 			writeErrorWithExtras(w, http.StatusBadRequest, "invalid_log_level", "invalid log level", map[string]any{"levels": logger.Levels()})
+			return
+		}
+		cfg, err := config.Load(r.configPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "config_load_failed", "load config failed")
+			return
+		}
+		cfg.LogLevel = level.String()
+		if err := config.Save(r.configPath, cfg); err != nil {
+			writeError(w, http.StatusInternalServerError, "config_write_failed", "write config failed")
 			return
 		}
 		logger.SetLevel(level)

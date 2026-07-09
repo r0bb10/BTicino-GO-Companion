@@ -59,9 +59,9 @@ func (d voicemailErrDriver) VoicemailDisable(context.Context) error { return d.d
 
 func newAuthedRouterWithControl(t *testing.T, cfg config.Config, controlSvc *control.Service) (*Router, string) {
 	t.Helper()
-	authStore, token := newClaimedAuth(t)
+	authStore, token, configPath := newClaimedAuth(t)
 	projector := state.NewProjector(cfg.Entrypoints)
-	r := NewRouter(cfg, authStore, projector, controlSvc, events.New(32), newTestRuntimeStatus(), trace.New(32), nil, nil, nil, nil, nil)
+	r := NewRouter(configPath, cfg, authStore, projector, controlSvc, events.New(32), newTestRuntimeStatus(), trace.New(32), nil, nil, nil, nil, nil)
 	return r, token
 }
 
@@ -164,11 +164,11 @@ func TestTraceAndReadEndpoints(t *testing.T) {
 }
 
 func TestAuthStatusRotateRevokeRepairReset(t *testing.T) {
-	authStore, token := newClaimedAuth(t)
+	authStore, token, configPath := newClaimedAuth(t)
 	cfg := config.Default()
 	p := state.NewProjector(cfg.Entrypoints)
 	ctrl := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(cfg, authStore, p, ctrl, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil, nil, nil)
+	r := NewRouter(configPath, cfg, authStore, p, ctrl, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v2/auth/status", nil)
 	rr := httptest.NewRecorder()
@@ -242,7 +242,7 @@ func TestAuthStatusWhenNeedsClaim(t *testing.T) {
 	cfg := config.Default()
 	p := state.NewProjector(cfg.Entrypoints)
 	ctrl := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(cfg, store, p, ctrl, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil, nil, nil)
+	r := NewRouter(filepath.Join(t.TempDir(), "config.json"), cfg, store, p, ctrl, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v2/auth/status", nil)
 	rr := httptest.NewRecorder()
@@ -390,7 +390,7 @@ func TestAuthHandlerErrorBranches(t *testing.T) {
 }
 
 func TestPairChallengeAlreadyClaimed(t *testing.T) {
-	store, token := newClaimedAuth(t)
+	store, token, _ := newClaimedAuth(t)
 	r := &Router{auth: store}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/pair/challenge", nil)
@@ -432,7 +432,7 @@ func TestBearerWrapperBranches(t *testing.T) {
 		t.Fatalf("expected auth unavailable and next not called, got code=%d next=%v", rr.Code, nextCalled)
 	}
 
-	store, token := newClaimedAuth(t)
+	store, token, _ := newClaimedAuth(t)
 	r.auth = store
 	handler = r.withBearer(func(http.ResponseWriter, *http.Request) { nextCalled = true })
 
@@ -457,7 +457,7 @@ func TestBearerWrapperBranches(t *testing.T) {
 }
 
 func TestAuthRepairFlowWithExpiredCode(t *testing.T) {
-	store, token := newClaimedAuth(t)
+	store, token, _ := newClaimedAuth(t)
 	r := &Router{auth: store}
 
 	code, _, err := store.IssueRepairCode(1 * time.Nanosecond)

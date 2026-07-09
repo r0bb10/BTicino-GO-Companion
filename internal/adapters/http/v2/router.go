@@ -18,21 +18,23 @@ import (
 )
 
 type Router struct {
-	cfg     config.Config
-	auth    *auth.Store
-	state   *state.Projector
-	control *control.Service
-	events  *events.Broker
-	runtime *runtime.Status
-	trace   *trace.Broker
-	system  *systemcontrol.Service
-	update  *update.Manager
-	diag    *diagnostics.Service
-	snap    *snapshot.Service
-	webrtc  *webrtc.Service
+	configPath string
+	cfg        config.Config
+	auth       *auth.Store
+	state      *state.Projector
+	control    *control.Service
+	events     *events.Broker
+	runtime    *runtime.Status
+	trace      *trace.Broker
+	system     *systemcontrol.Service
+	update     *update.Manager
+	diag       *diagnostics.Service
+	snap       *snapshot.Service
+	webrtc     *webrtc.Service
 }
 
 func NewRouter(
+	configPath string,
 	cfg config.Config,
 	authStore *auth.Store,
 	projector *state.Projector,
@@ -47,18 +49,19 @@ func NewRouter(
 	webrtcService *webrtc.Service,
 ) *Router {
 	return &Router{
-		cfg:     cfg,
-		auth:    authStore,
-		state:   projector,
-		control: controlService,
-		events:  eventBroker,
-		runtime: runtimeStatus,
-		trace:   traceBroker,
-		system:  systemControl,
-		update:  updateManager,
-		diag:    diagnosticsService,
-		snap:    snapshotService,
-		webrtc:  webrtcService,
+		configPath: configPath,
+		cfg:        cfg,
+		auth:       authStore,
+		state:      projector,
+		control:    controlService,
+		events:     eventBroker,
+		runtime:    runtimeStatus,
+		trace:      traceBroker,
+		system:     systemControl,
+		update:     updateManager,
+		diag:       diagnosticsService,
+		snap:       snapshotService,
+		webrtc:     webrtcService,
 	}
 }
 

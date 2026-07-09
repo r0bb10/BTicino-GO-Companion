@@ -134,6 +134,13 @@ func TestLoggingEndpointRequiresConfiguredSessionAndUpdatesLevel(t *testing.T) {
 	if logger.GetLevel() != logger.DEBUG {
 		t.Fatalf("expected debug level, got %s", logger.GetLevel().String())
 	}
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load persisted config: %v", err)
+	}
+	if loaded.LogLevel != "debug" {
+		t.Fatalf("expected persisted debug level, got %q", loaded.LogLevel)
+	}
 }
 
 func TestCredentialChangeRequiresCurrentPasswordAndInvalidatesSessions(t *testing.T) {

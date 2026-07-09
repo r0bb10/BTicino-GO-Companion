@@ -58,9 +58,14 @@ func newTestRuntimeStatus() *runtime.Status {
 	return rt
 }
 
-func newClaimedAuth(t *testing.T) (*auth.Store, string) {
+func newClaimedAuth(t *testing.T) (*auth.Store, string, string) {
 	t.Helper()
-	store, err := auth.NewStore(filepath.Join(t.TempDir(), "config.json"), "abcd-1234", "C300X", "00:11:22:33:44:55")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.Default()
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	store, err := auth.NewStore(configPath, "abcd-1234", "C300X", "00:11:22:33:44:55")
 	if err != nil {
 		t.Fatalf("new auth store: %v", err)
 	}
@@ -76,7 +81,7 @@ func newClaimedAuth(t *testing.T) (*auth.Store, string) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	return store, token
+	return store, token, configPath
 }
 
 func authReq(method string, path string, token string) *http.Request {
@@ -87,10 +92,10 @@ func authReq(method string, path string, token string) *http.Request {
 
 func newAuthedRouter(t *testing.T) (*Router, string) {
 	t.Helper()
-	authStore, token := newClaimedAuth(t)
+	authStore, token, configPath := newClaimedAuth(t)
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(config.Default(), authStore, p, c, events.New(32), newTestRuntimeStatus(), trace.New(16), nil, nil, nil, nil, nil)
+	r := NewRouter(configPath, config.Default(), authStore, p, c, events.New(32), newTestRuntimeStatus(), trace.New(16), nil, nil, nil, nil, nil)
 	return r, token
 }
 
@@ -188,7 +193,10 @@ func TestLogsEndpointRequiresBearerAndReturnsTail(t *testing.T) {
 }
 
 func TestLoggingEndpointRequiresBearerAndUpdatesLevel(t *testing.T) {
-	r, token := newAuthedRouter(t)
+	authStore, token, configPath := newClaimedAuth(t)
+	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
+	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
+	r := NewRouter(configPath, config.Default(), authStore, p, c, events.New(32), newTestRuntimeStatus(), trace.New(16), nil, nil, nil, nil, nil)
 	originalLevel := logger.GetLevel()
 	originalPath := logger.LogPath()
 	logPath := filepath.Join(t.TempDir(), "companion.log")
@@ -235,16 +243,27 @@ func TestLoggingEndpointRequiresBearerAndUpdatesLevel(t *testing.T) {
 	if logger.GetLevel() != logger.DEBUG {
 		t.Fatalf("expected debug level, got %s", logger.GetLevel().String())
 	}
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load persisted config: %v", err)
+	}
+	if loaded.LogLevel != "debug" {
+		t.Fatalf("expected persisted debug level, got %q", loaded.LogLevel)
+	}
 }
 
 func TestRouterPairChallengeAndClaim(t *testing.T) {
-	authStore, err := auth.NewStore(filepath.Join(t.TempDir(), "config.json"), "abcd-1234", "C300X", "00:11:22:33:44:55")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(configPath, config.Default()); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	authStore, err := auth.NewStore(configPath, "abcd-1234", "C300X", "00:11:22:33:44:55")
 	if err != nil {
 		t.Fatalf("new auth store: %v", err)
 	}
 	p := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	c := control.New(p.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(config.Default(), authStore, p, c, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil, nil, nil)
+	r := NewRouter(configPath, config.Default(), authStore, p, c, events.New(8), newTestRuntimeStatus(), trace.New(8), nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/pair/challenge", nil)
 	rr := httptest.NewRecorder()

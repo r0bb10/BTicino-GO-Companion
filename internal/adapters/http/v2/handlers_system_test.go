@@ -57,10 +57,10 @@ func (s *systemManagerStub) Restart(_ context.Context, serviceName string) error
 
 func newAuthedRouterWithDeps(t *testing.T, cfg config.Config, systemSvc *systemcontrol.Service, updateMgr *update.Manager) (*Router, string) {
 	t.Helper()
-	authStore, token := newClaimedAuth(t)
+	authStore, token, configPath := newClaimedAuth(t)
 	projector := state.NewProjector([]entrypoint.Model{{ID: "main", Label: "Main", DevAddr: "20", HasStream: true, HasUnlock: true, HasRing: true}})
 	ctrl := control.New(projector.Snapshot().Entrypoints, streamNoop{}, unlockNoop{}, callNoop{}, audioNoop{}, voicemailNoop{}, nil)
-	r := NewRouter(cfg, authStore, projector, ctrl, events.New(32), newTestRuntimeStatus(), trace.New(32), systemSvc, updateMgr, nil, nil, nil)
+	r := NewRouter(configPath, cfg, authStore, projector, ctrl, events.New(32), newTestRuntimeStatus(), trace.New(32), systemSvc, updateMgr, nil, nil, nil)
 	return r, token
 }
 

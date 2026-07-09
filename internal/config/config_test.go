@@ -55,6 +55,25 @@ func TestSaveLoadPersistsOpenWebNetCommandPassword(t *testing.T) {
 	}
 }
 
+func TestSaveLoadPersistsLogLevel(t *testing.T) {
+	tDir := t.TempDir()
+	path := filepath.Join(tDir, "config.json")
+
+	cfg := Default()
+	cfg.LogLevel = "debug"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if loaded.LogLevel != "debug" {
+		t.Fatalf("expected persisted log level debug, got %q", loaded.LogLevel)
+	}
+}
+
 func TestSaveOmitsEmptyWebAuth(t *testing.T) {
 	tDir := t.TempDir()
 	path := filepath.Join(tDir, "config.json")

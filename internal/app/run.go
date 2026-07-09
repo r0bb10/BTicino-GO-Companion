@@ -81,6 +81,11 @@ func Run(ctx context.Context, cfgPath string) error {
 	if created {
 		logger.Infof(configTag, "created default config path=%s", resolvedConfigPath)
 	}
+	if level, err := logger.ParseLevel(cfg.LogLevel); err == nil {
+		logger.SetLevel(level)
+	} else {
+		logger.Warnf(configTag, "invalid persisted log level level=%q err=%v", cfg.LogLevel, err)
+	}
 
 	commandClient := openwebnet.NewCommandClient(cfg)
 	if cfg.OpenWebNetEnabled {
@@ -364,6 +369,7 @@ func Run(ctx context.Context, cfgPath string) error {
 	}
 
 	router := v2.NewRouter(
+		resolvedConfigPath,
 		cfg,
 		authStore,
 		projector,
