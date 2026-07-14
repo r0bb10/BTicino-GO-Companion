@@ -242,7 +242,7 @@ func Default() Config {
 		MediaSIPEnabled:           true,
 		MediaSIPTransport:         "tcp",
 		MediaSIPListen:            "0.0.0.0:5070",
-		MediaSIPFrom:              "webrtc@127.0.0.1",
+		MediaSIPFrom:              "companion@127.0.0.1",
 		MediaSIPTo:                "",
 		MediaSIPDomain:            "",
 		MediaSIPAuthUser:          "",
@@ -611,9 +611,8 @@ func (c *Config) normalize() {
 	if strings.TrimSpace(c.MediaSIPListen) == "" {
 		c.MediaSIPListen = "0.0.0.0:5070"
 	}
-	if strings.TrimSpace(c.MediaSIPFrom) == "" {
-		c.MediaSIPFrom = "webrtc@127.0.0.1"
-	}
+	c.MediaSIPFrom = "companion@127.0.0.1"
+	c.MediaSIPAuthUser = "companion"
 	if strings.TrimSpace(c.MediaRTSPAddress) == "" {
 		c.MediaRTSPAddress = ":8554"
 	}

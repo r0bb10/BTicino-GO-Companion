@@ -18,16 +18,12 @@ var (
 		"/etc/flexisip/flexisip.conf",
 		"/home/bticino/cfg/flexisip.conf",
 	}
-	flexisipUsersDBPaths = []string{
-		"/etc/flexisip/users/users.db.txt",
-	}
 )
 
 var ErrSIPProfileUnset = errors.New("sip runtime profile not configured")
 
 type flexisipProfile struct {
-	Domain   string
-	AuthUser string
+	Domain string
 }
 
 func resolveSIPConfig(cfg config.Config) (config.Config, error) {
@@ -40,14 +36,8 @@ func resolveSIPConfig(cfg config.Config) (config.Config, error) {
 		out.MediaSIPDomain = domain
 	}
 
-	from := strings.TrimSpace(out.MediaSIPFrom)
-	if (from == "" || strings.EqualFold(from, "webrtc@127.0.0.1") || strings.EqualFold(from, "sip:webrtc@127.0.0.1")) && profile.AuthUser != "" {
-		out.MediaSIPFrom = profile.AuthUser + "@127.0.0.1"
-	}
-
-	if strings.TrimSpace(out.MediaSIPAuthUser) == "" && profile.AuthUser != "" {
-		out.MediaSIPAuthUser = profile.AuthUser
-	}
+	out.MediaSIPFrom = "companion@127.0.0.1"
+	out.MediaSIPAuthUser = "companion"
 
 	to := strings.TrimSpace(out.MediaSIPTo)
 	if to == "" {
@@ -66,7 +56,6 @@ func resolveSIPConfig(cfg config.Config) (config.Config, error) {
 func discoverFlexisipProfile() flexisipProfile {
 	profile := flexisipProfile{}
 	profile.Domain = discoverFlexisipDomain()
-	profile.AuthUser = discoverFlexisipAuthUser(profile.Domain)
 	return profile
 }
 
@@ -98,48 +87,6 @@ func discoverFlexisipDomain() string {
 		}
 	}
 	return ""
-}
-
-func discoverFlexisipAuthUser(domain string) string {
-	body, ok := readFirstExistingFile(flexisipUsersDBPaths)
-	if !ok {
-		return ""
-	}
-	for _, line := range splitNonEmptyLines(body) {
-		if strings.HasPrefix(line, "version:") {
-			continue
-		}
-		token := strings.Fields(line)
-		if len(token) == 0 {
-			continue
-		}
-		user, host, ok := parseUserAtHost(token[0])
-		if !ok || user == "" {
-			continue
-		}
-		if domain == "" || strings.EqualFold(host, domain) {
-			return user
-		}
-	}
-	return ""
-}
-
-func parseUserAtHost(value string) (string, string, bool) {
-	v := strings.TrimSpace(value)
-	if strings.HasPrefix(strings.ToLower(v), "sip:") {
-		v = v[4:]
-	}
-	parts := strings.SplitN(v, "@", 2)
-	if len(parts) != 2 {
-		return "", "", false
-	}
-	user := strings.TrimSpace(parts[0])
-	host := strings.TrimSpace(parts[1])
-	host = strings.SplitN(host, ";", 2)[0]
-	if user == "" || host == "" {
-		return "", "", false
-	}
-	return user, host, true
 }
 
 func parseKVLine(line string, key string) (string, bool) {
