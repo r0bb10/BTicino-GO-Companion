@@ -72,6 +72,7 @@ type Server struct {
 
 	returnAudio *returnAudioForwarder
 	audioBridge *audiobridge.Service
+	audioMirror *audioRTPMirror
 	bridgeCtx   context.Context
 
 	snapshotMirrorConn             *net.UDPConn
@@ -102,6 +103,7 @@ func NewServer(cfg config.Config, lifecycle Lifecycle) *Server {
 		pathList:    sortedRoutePaths(paths),
 		returnAudio: newReturnAudioForwarder(btReturnAudioAddr),
 		audioBridge: audiobridge.New(audiobridge.DefaultConfig(cfg.DataDir)),
+		audioMirror: newAudioRTPMirror(),
 	}
 	s.srv = &gortsplib.Server{
 		Handler:        s,
@@ -129,6 +131,7 @@ func (s *Server) Start(ctx context.Context) error {
 		if s.audioBridge.Enabled() {
 			_ = s.audioBridge.Stop(context.Background())
 		}
+		s.ClearAudioRTPMirror()
 		s.closeReturnAudio()
 		s.closeSnapshotMirror()
 		s.srv.Close()
@@ -273,6 +276,44 @@ func (s *Server) SetOnAudioPacketRTP(fn func(*rtp.Packet)) {
 	s.mu.Unlock()
 }
 
+func (s *Server) ConfigureAudioRTPMirror(format string, port int) (AudioRTPMirrorStatus, error) {
+	if s == nil || s.audioMirror == nil {
+		return AudioRTPMirrorStatus{}, errors.New("audio RTP mirror unavailable")
+	}
+	switch format {
+	case "speex":
+		return s.audioMirror.Configure("speex", "speex", rtpPayloadTypeSpeex, port)
+	case "opus":
+		if s.audioBridge == nil || !s.audioBridge.Enabled() {
+			return s.audioMirror.Status(), errors.New("Opus audio bridge unavailable")
+		}
+		return s.audioMirror.Configure("opus", "opus", s.audioBridge.OpusPayloadType(), port)
+	default:
+		return s.audioMirror.Status(), errors.New("unsupported audio RTP mirror format")
+	}
+}
+
+func (s *Server) ClearAudioRTPMirror() AudioRTPMirrorStatus {
+	if s == nil || s.audioMirror == nil {
+		return AudioRTPMirrorStatus{}
+	}
+	return s.audioMirror.Clear()
+}
+
+func (s *Server) AudioRTPMirrorStatus() AudioRTPMirrorStatus {
+	if s == nil || s.audioMirror == nil {
+		return AudioRTPMirrorStatus{}
+	}
+	return s.audioMirror.Status()
+}
+
+func (s *Server) writeAudioMirror(format string, payloadType uint8, datagram []byte) {
+	if s == nil || s.audioMirror == nil {
+		return
+	}
+	s.audioMirror.Write(format, payloadType, datagram)
+}
+
 func (s *Server) ensureStaticStream() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -396,6 +437,9 @@ func (s *Server) runIngestListener(ctx context.Context, port int, mediaType desc
 				logger.Debugf(tag, "ingest packets media=%v port=%d count=%d last_seq=%d last_ts=%d", mediaType, port, validPackets, pkt.SequenceNumber, pkt.Timestamp)
 				lastCountLog = time.Now()
 			}
+		}
+		if mediaType == description.MediaTypeAudio {
+			s.writeAudioMirror("speex", pkt.PayloadType, buf[:n])
 		}
 		s.writeIngestPacket(mediaType, &pkt)
 	}
@@ -529,6 +573,7 @@ func (s *Server) runBridgeOpusOutListener(ctx context.Context, port int, expecte
 		if pkt.PayloadType != expectedPayloadType {
 			continue
 		}
+		s.writeAudioMirror("opus", pkt.PayloadType, buf[:n])
 		if cb := s.audioPacketCallback(); cb != nil {
 			cb(&pkt)
 		}

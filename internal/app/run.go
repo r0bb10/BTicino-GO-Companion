@@ -382,6 +382,7 @@ func Run(ctx context.Context, cfgPath string) error {
 		diagnosticsService,
 		snapshotService,
 		webrtcSvc,
+		rtspServer,
 	)
 	srv.Handler = router.Handler()
 

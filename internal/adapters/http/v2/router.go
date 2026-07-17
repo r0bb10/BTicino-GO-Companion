@@ -3,6 +3,7 @@ package v2
 import (
 	"net/http"
 
+	"bticino-go-companion/internal/adapters/rtsp"
 	"bticino-go-companion/internal/auth"
 	"bticino-go-companion/internal/config"
 	"bticino-go-companion/internal/services/control"
@@ -18,19 +19,26 @@ import (
 )
 
 type Router struct {
-	configPath string
-	cfg        config.Config
-	auth       *auth.Store
-	state      *state.Projector
-	control    *control.Service
-	events     *events.Broker
-	runtime    *runtime.Status
-	trace      *trace.Broker
-	system     *systemcontrol.Service
-	update     *update.Manager
-	diag       *diagnostics.Service
-	snap       *snapshot.Service
-	webrtc     *webrtc.Service
+	configPath  string
+	cfg         config.Config
+	auth        *auth.Store
+	state       *state.Projector
+	control     *control.Service
+	events      *events.Broker
+	runtime     *runtime.Status
+	trace       *trace.Broker
+	system      *systemcontrol.Service
+	update      *update.Manager
+	diag        *diagnostics.Service
+	snap        *snapshot.Service
+	webrtc      *webrtc.Service
+	audioMirror AudioRTPMirror
+}
+
+type AudioRTPMirror interface {
+	ConfigureAudioRTPMirror(format string, port int) (rtspadapter.AudioRTPMirrorStatus, error)
+	ClearAudioRTPMirror() rtspadapter.AudioRTPMirrorStatus
+	AudioRTPMirrorStatus() rtspadapter.AudioRTPMirrorStatus
 }
 
 func NewRouter(
@@ -47,21 +55,27 @@ func NewRouter(
 	diagnosticsService *diagnostics.Service,
 	snapshotService *snapshot.Service,
 	webrtcService *webrtc.Service,
+	audioMirrors ...AudioRTPMirror,
 ) *Router {
+	var audioMirror AudioRTPMirror
+	if len(audioMirrors) > 0 {
+		audioMirror = audioMirrors[0]
+	}
 	return &Router{
-		configPath: configPath,
-		cfg:        cfg,
-		auth:       authStore,
-		state:      projector,
-		control:    controlService,
-		events:     eventBroker,
-		runtime:    runtimeStatus,
-		trace:      traceBroker,
-		system:     systemControl,
-		update:     updateManager,
-		diag:       diagnosticsService,
-		snap:       snapshotService,
-		webrtc:     webrtcService,
+		configPath:  configPath,
+		cfg:         cfg,
+		auth:        authStore,
+		state:       projector,
+		control:     controlService,
+		events:      eventBroker,
+		runtime:     runtimeStatus,
+		trace:       traceBroker,
+		system:      systemControl,
+		update:      updateManager,
+		diag:        diagnosticsService,
+		snap:        snapshotService,
+		webrtc:      webrtcService,
+		audioMirror: audioMirror,
 	}
 }
 
@@ -91,6 +105,9 @@ func (r *Router) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v2/logging", r.withBearer(r.handleLogging))
 	mux.HandleFunc("GET /api/v2/trace/openwebnet", r.withBearer(r.handleOpenWebNetTrace))
 	mux.HandleFunc("GET /api/v2/trace/openwebnet/stream", r.withBearer(r.handleOpenWebNetTraceStream))
+	mux.HandleFunc("GET /api/v2/diagnostics/audio-rtp-mirror", r.withBearer(r.handleAudioRTPMirror))
+	mux.HandleFunc("PUT /api/v2/diagnostics/audio-rtp-mirror", r.withBearer(r.handleAudioRTPMirror))
+	mux.HandleFunc("DELETE /api/v2/diagnostics/audio-rtp-mirror", r.withBearer(r.handleAudioRTPMirror))
 	mux.HandleFunc("GET /api/v2/voicemail/messages", r.withBearer(r.handleVoicemailMessages))
 	mux.HandleFunc("GET /api/v2/voicemail/messages/{message_id}/{asset}", r.withBearer(r.handleVoicemailAsset))
 
