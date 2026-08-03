@@ -348,9 +348,12 @@ func TestServer_WebRTCContract(t *testing.T) {
 		return response
 	}
 
-	offer := write(`{"type":"offer","id":"session-1","payload":{"session_id":"session-1","entrypoint_id":"main","origin":"native_camera","offer_sdp":"offer-sdp"}}`)
+	offer := write(`{"type":"offer","id":"session-1","payload":{"session_id":"session-1","entrypoint_id":"main","origin":"native_camera","offer_sdp":"offer-sdp","ice_servers":[{"urls":["turn:turn.example.test"],"username":"user","credential":"secret"}]}}`)
 	if offer["type"] != "answer" || control.sessionID != "session-1" || control.entrypointID != "main" || control.offerSDP != "offer-sdp" {
 		t.Fatalf("offer response = %#v, call = %#v", offer, control)
+	}
+	if len(control.iceServers) != 1 || control.iceServers[0].URLs[0] != "turn:turn.example.test" || control.iceServers[0].Username != "user" || control.iceServers[0].Credential != "secret" {
+		t.Fatalf("ICE servers = %#v", control.iceServers)
 	}
 
 	candidate := write(`{"type":"candidate","id":"session-1","payload":{"session_id":"session-1","candidate":{"candidate":"candidate:1 1 udp 1 192.0.2.1 12345 typ host","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":"ufrag"}}}`)
@@ -700,10 +703,12 @@ type webRTCRecorder struct {
 	candidateSessionID                string
 	candidate                         media.ICECandidate
 	localCandidates                   []*media.ICECandidate
+	iceServers                        []media.ICEServer
 }
 
-func (r *webRTCRecorder) Offer(_ context.Context, sessionID, entrypointID, offerSDP string, onLocalCandidate func(*media.ICECandidate)) (string, error) {
+func (r *webRTCRecorder) Offer(_ context.Context, sessionID, entrypointID, offerSDP string, iceServers []media.ICEServer, onLocalCandidate func(*media.ICECandidate)) (string, error) {
 	r.sessionID, r.entrypointID, r.offerSDP = sessionID, entrypointID, offerSDP
+	r.iceServers = iceServers
 	if onLocalCandidate != nil {
 		for _, candidate := range r.localCandidates {
 			onLocalCandidate(candidate)
