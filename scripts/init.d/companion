@@ -27,6 +27,9 @@ START_ATTEMPTS=3
 RETRY_DELAY_SECONDS=2
 WATCHDOG_INTERVAL_SECONDS=15
 WATCHDOG_MAX_BACKOFF_SECONDS=120
+BINARY_WAIT_SECONDS="${COMPANION_BINARY_WAIT_SECONDS:-60}"
+LAN_IP_WAIT_SECONDS=30
+FLEXISIP_PASSPHRASE_FILE="/var/tmp/bt_answering_machine.fifo"
 
 if [ -f /etc/init.d/functions ]; then
 	# shellcheck source=/dev/null
@@ -61,6 +64,40 @@ remove_firewall() {
 	[ -x /usr/sbin/iptables ] || return 0
 	for port in $(tcp_listen_ports); do remove_firewall_rule tcp "${port}"; done
 	for port in $(udp_listen_ports); do remove_firewall_rule udp "${port}"; done
+}
+
+device_lan_ip() {
+	addr="$(/bin/busybox ip -4 addr show wlan0 2>/dev/null |
+		awk '/inet /{print $2; exit}' |
+		cut -d/ -f1)"
+	[ -n "${addr}" ] || return 1
+	printf '%s' "${addr}"
+}
+
+wait_for_lan_ip() {
+	attempt=0
+	while [ "${attempt}" -lt "${LAN_IP_WAIT_SECONDS}" ]; do
+		device_lan_ip >/dev/null 2>&1 && return 0
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	return 1
+}
+
+flexisip_listening() {
+	netstat -lnt 2>/dev/null | grep -q '127.0.0.1:5060'
+}
+
+# The local SIP proxy must be ready before the intercom services register.
+ensure_flexisip() {
+	flexisip_listening && return 0
+	[ -x /etc/init.d/flexisipsh ] || return 0
+	ip="$(device_lan_ip)" || return 0
+	if [ -e "${FLEXISIP_PASSPHRASE_FILE}" ]; then
+		/etc/init.d/flexisipsh start "${ip}" "${FLEXISIP_PASSPHRASE_FILE}" >/dev/null 2>&1 || true
+		return 0
+	fi
+	/etc/init.d/flexisipsh start "${ip}" >/dev/null 2>&1 || true
 }
 
 process_running() {
@@ -129,6 +166,19 @@ with_lifecycle_lock() {
 cleanup_stale_pidfile() {
 	[ -f "${PIDFILE}" ] || return 0
 	process_running || rm -f "${PIDFILE}"
+}
+
+# The Companion data partition can become available after this init script runs.
+wait_for_binary() {
+	attempt=0
+	while [ "${attempt}" -lt "${BINARY_WAIT_SECONDS}" ]; do
+		if [ -x "${BIN_PATH}" ] || [ -x "${STAGED_BIN_PATH}" ]; then
+			return 0
+		fi
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	[ -x "${BIN_PATH}" ] || [ -x "${STAGED_BIN_PATH}" ]
 }
 
 activate_staged_binary() {
@@ -240,6 +290,7 @@ do_watchdog() {
 	trap 'rm -f "${WATCHDOG_PIDFILE}"; exit 0' INT TERM
 	backoff="${WATCHDOG_INTERVAL_SECONDS}"
 	while [ -f "${WATCHDOG_ENABLE_FILE}" ]; do
+		ensure_flexisip
 		if companion_healthy; then
 			backoff="${WATCHDOG_INTERVAL_SECONDS}"
 			sleep "${WATCHDOG_INTERVAL_SECONDS}"
@@ -259,8 +310,13 @@ do_watchdog() {
 }
 
 do_start() {
-	with_lifecycle_lock start true || return 1
-	start_watchdog
+	wait_for_binary || echo "Companion binary still missing after ${BINARY_WAIT_SECONDS}s" >&2
+	wait_for_lan_ip || true
+	ensure_flexisip
+	with_lifecycle_lock start true
+	start_status=$?
+	start_watchdog || return 1
+	return "${start_status}"
 }
 
 do_stop() {
