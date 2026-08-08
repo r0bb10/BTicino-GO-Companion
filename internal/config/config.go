@@ -50,6 +50,7 @@ type Companion struct {
 	DeviceID    string       `yaml:"-"`
 	Model       string       `yaml:"-"`
 	Entrypoints []Entrypoint `yaml:"entrypoints"`
+	SIP         SIP          `yaml:"sip"`
 }
 
 type Entrypoint struct {
@@ -63,6 +64,12 @@ type Capabilities struct {
 	Stream bool `yaml:"stream" json:"stream"`
 	Unlock bool `yaml:"unlock" json:"unlock"`
 	Ring   bool `yaml:"ring" json:"ring"`
+}
+
+// SIP controls inbound SIP call handling. Identity and transport settings are
+// internal defaults so only the supported inbound switch reaches config.yaml.
+type SIP struct {
+	Inbound bool `yaml:"inbound"`
 }
 
 type Auth struct {
@@ -128,6 +135,7 @@ type persistedConfig struct {
 
 type persistedCompanion struct {
 	Entrypoints []Entrypoint `yaml:"entrypoints"`
+	SIP         SIP          `yaml:"sip"`
 }
 
 type Metadata struct {
@@ -189,6 +197,7 @@ func Default(metadata Metadata) (Config, error) {
 					Ring:   true,
 				},
 			}},
+			SIP: SIP{Inbound: true},
 		},
 		Auth: Auth{
 			PairingState:    PairingStateSetupRequired,
@@ -253,6 +262,7 @@ func Load(path string) (Config, error) {
 	cfg := Config{
 		Companion: Companion{
 			Entrypoints: persisted.Companion.Entrypoints,
+			SIP:         persisted.Companion.SIP,
 		},
 		Auth:    persisted.Auth.HomeAssistant,
 		WebUI:   persisted.Auth.WebUI,
@@ -270,6 +280,67 @@ func Load(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// sipSectionProbe mirrors just enough of the on-disk layout to tell whether a
+// document already carries companion.sip. The pointer is the whole point: it
+// stays nil exactly when the key is absent.
+type sipSectionProbe struct {
+	Companion struct {
+		SIP *SIP `yaml:"sip"`
+	} `yaml:"companion"`
+}
+
+// sipSectionPersisted reports whether path stores a companion.sip section. A
+// decoded Config cannot answer this: Inbound's zero value is already false, so
+// a file written before the section existed is indistinguishable from one that
+// stores false. Only the document itself carries the signal.
+func sipSectionPersisted(path string) (bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("open config: %w", err)
+	}
+	defer file.Close() //nolint:errcheck // close error not meaningful for read-only handle
+
+	var probe sipSectionProbe
+
+	// KnownFields stays off on purpose: the probe asks about one key and must
+	// ignore every other field in the document.
+	if err := yaml.NewDecoder(file).Decode(&probe); err != nil {
+		return false, fmt.Errorf("decode config: %w", err)
+	}
+
+	return probe.Companion.SIP != nil, nil
+}
+
+// EnsureSIPSection persists the companion.sip section on installations whose
+// config.yaml predates it, so the section exists on disk for the installer to
+// enable. It writes at most once: nothing is written when the section is
+// already stored. Inbound defaults to true for migrated installations. Reports
+// whether the file was rewritten.
+func (s *Store) EnsureSIPSection() (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	persisted, err := sipSectionPersisted(s.path)
+	if err != nil {
+		return false, fmt.Errorf("probe sip section: %w", err)
+	}
+
+	if persisted {
+		return false, nil
+	}
+
+	next := clone(s.cfg)
+	next.Companion.SIP.Inbound = true
+
+	if err := save(s.path, next, false); err != nil {
+		return false, fmt.Errorf("persist sip section: %w", err)
+	}
+
+	s.cfg = next
+
+	return true, nil
 }
 
 func (s *Store) Snapshot() Config {
@@ -372,9 +443,30 @@ func saveNew(path string, cfg Config) error {
 }
 
 func save(path string, cfg Config, exclusive bool) error {
+	data, err := encode(cfg)
+	if err != nil {
+		return err
+	}
+
+	if err := storage.WritePrivateFile(path, ".config-*.yaml", data, exclusive); err != nil {
+		if exclusive && errors.Is(err, os.ErrExist) {
+			return ErrConfigExists
+		}
+
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	return nil
+}
+
+// encode renders the on-disk document. Every persistedConfig field is read back
+// by Load, and Load rejects unknown fields, so this is a lossless round trip for
+// any config.yaml the companion can open.
+func encode(cfg Config) ([]byte, error) {
 	data, err := yaml.Marshal(persistedConfig{
 		Companion: persistedCompanion{
 			Entrypoints: cfg.Companion.Entrypoints,
+			SIP:         cfg.Companion.SIP,
 		},
 		Logging: cfg.Logging,
 		Auth:    persistedAuth{HomeAssistant: cfg.Auth, WebUI: cfg.WebUI},
@@ -387,18 +479,10 @@ func save(path string, cfg Config, exclusive bool) error {
 		HomeKit: cfg.HomeKit,
 	})
 	if err != nil {
-		return fmt.Errorf("encode config: %w", err)
+		return nil, fmt.Errorf("encode config: %w", err)
 	}
 
-	if err := storage.WritePrivateFile(path, ".config-*.yaml", data, exclusive); err != nil {
-		if exclusive && errors.Is(err, os.ErrExist) {
-			return ErrConfigExists
-		}
-
-		return fmt.Errorf("save config: %w", err)
-	}
-
-	return nil
+	return data, nil
 }
 
 func ensureSingleDocument(decoder *yaml.Decoder) error {

@@ -7,7 +7,8 @@ import (
 
 const (
 	// SIP requires media sections, but the intercom sends the usable clear RTP
-	// through separate OpenWebNet AV requests to ports 5000 and 5007.
+	// through separate OpenWebNet AV requests, to whichever loopback ports the
+	// receivers bound — see media.AVPorts. These two numbers carry no traffic.
 	AudioSDPPort = 65000
 	VideoSDPPort = 65002
 )
@@ -25,8 +26,14 @@ func BuildOffer(host, devAddr string) string {
 	return strings.Join(lines, "\r\n") + "\r\n"
 }
 
-func BuildAnswer(host string) string {
+func BuildAnswer(host, devAddr string) string {
 	lines := sessionLines(host, "3747", "461")
+
+	devAddr = strings.TrimSpace(devAddr)
+	if devAddr != "" {
+		lines = append(lines, "a=DEVADDR:"+devAddr)
+	}
+
 	lines = append(lines, mediaLines()...)
 
 	return strings.Join(lines, "\r\n") + "\r\n"
